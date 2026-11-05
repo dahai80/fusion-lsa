@@ -48,6 +48,12 @@ def bench(total, index_dim, block_size, pool_size, bucket_size, bucket_cap, top_
     queries = queries / mx.linalg.norm(queries, axis=1, keepdims=True)
     positions = mx.arange(decode_queries) + (total - decode_queries)
 
+    # Warmup: compile the read graph and prime the allocator before timing
+    warm_selected, warm_lengths = read(
+        queries[:4], positions[:4], buckets, top_p, top_k, sink, window
+    )
+    mx.eval(warm_selected, warm_lengths)
+
     t0 = time.perf_counter()
     selected, lengths = read(queries, positions, buckets, top_p, top_k, sink, window)
     mx.eval(selected, lengths)
