@@ -106,6 +106,10 @@ def members_from_labels(labels: mx.array, bucket_count: int, bucket_cap: int) ->
         count = int(is_mem.sum().item())
         if count == 0:
             continue
+        if count > bucket_cap:
+            raise ValueError(
+                f"bucket {bucket} holds {count} keys against a cap of {bucket_cap} - labels are not a valid partition"
+            )
         order = mx.argsort((~is_mem).astype(mx.int32))
         keys = order[:count]
         row = mx.full((1, bucket_cap), -1, dtype=mx.int32)
