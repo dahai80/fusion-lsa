@@ -41,6 +41,8 @@ def main() -> None:
     parser.add_argument("--tokens", type=int, default=DEFAULT_TOKENS, help="document length")
     parser.add_argument("--queries", type=int, default=DEFAULT_QUERY_COUNT, help="sampled query count")
     parser.add_argument("--layers", default="", help="comma-separated decoder layers, default all full-attention")
+    parser.add_argument("--device", default="cpu", help="torch device, e.g. cpu or mps")
+    parser.add_argument("--dtype", default="float32", help="checkpoint dtype, e.g. float32 or bfloat16")
     args = parser.parse_args()
 
     sys.path.insert(0, upstream_path())
@@ -54,10 +56,31 @@ def main() -> None:
     if not checkpoint.is_dir():
         raise SystemExit(f"checkpoint directory not found: {checkpoint}")
 
-    model_config = ModelConfig(checkpoint=str(checkpoint), dtype="float32")
+    model_config = ModelConfig(name=str(checkpoint), dtype=args.dtype)
     model_adapter = adapter.adapter_for(model_config)
     logger.info("adapter %s for %s", type(model_adapter).__name__, checkpoint)
-    model, tokenizer = model_adapter.load(model_config, "cpu", attention="sdpa")
+    if args.device != "cpu":
+        # accelerate's device_map=<accelerator or cpu> breaks on some checkpoints (MPS
+        # placeholder storage); load whole on CPU, then move
+        from lsa.evaluation.adapter.model import torch_dtype
+
+        def load_then_move(config, device, attention="sdpa", span=None):
+            from transformers import AutoTokenizer, AutoModelForCausalLM
+
+            model = AutoModelForCausalLM.from_pretrained(
+                config.checkpoint,
+                config=model_adapter.pretrained_config(config),
+                dtype=torch_dtype(config.dtype),
+                attn_implementation=attention,
+                device_map=None,
+            )
+            model.eval()
+            if hasattr(model, "model") and hasattr(model.model, "visual"):
+                model.model.visual = None
+            return model.to(device), AutoTokenizer.from_pretrained(config.checkpoint)
+
+        model_adapter.load = load_then_move
+    model, tokenizer = model_adapter.load(model_config, args.device, attention="sdpa")
     text_model = model_adapter.text_model(model)
     text_config = model_adapter.text_config(model_config)
     every_layer = model_adapter.full_attention_layers(text_config, model_config)
@@ -69,6 +92,8 @@ def main() -> None:
     vocab = text_config.vocab_size
     gen = torch.Generator().manual_seed(1105)
     ids = torch.randint(0, vocab, (1, args.tokens), generator=gen)
+    # MPS raises a placeholder-storage error when indices sit on CPU against an MPS model
+    ids = ids.to(model.device)
     logger.info("document: %d random tokens (vocab %d)", args.tokens, vocab)
 
     captured = capture_layer_inputs(text_model, layers, ids)
@@ -76,11 +101,12 @@ def main() -> None:
 
     first = min(2 * indexer.window_size, args.tokens - 2)
     positions = torch.linspace(first, args.tokens - 2, args.queries).long().unique()
+    positions = positions.to(model.device)
     logger.info("query positions %s", positions.tolist())
 
     width = indexer.top_k + indexer.window_size + indexer.sink_size
     fields: dict[str, np.ndarray] = {
-        "positions": positions.numpy().astype(np.int64),
+        "positions": positions.cpu().numpy().astype(np.int64),
         "meta.window_size": np.array(indexer.window_size),
         "meta.sink_size": np.array(indexer.sink_size),
         "meta.top_k": np.array(indexer.top_k),
@@ -111,10 +137,10 @@ def main() -> None:
                 indexer.sink_size,
                 indexer.window_size,
             )
-        selected_np = selected.numpy().astype(np.int32)
-        lengths_np = lengths.numpy().astype(np.int64)
-        fields[f"layer{index}.index_queries"] = view.index_queries.numpy().astype(np.float32)
-        fields[f"layer{index}.index_keys"] = view.index_keys.numpy().astype(np.float32)
+        selected_np = selected.cpu().numpy().astype(np.int32)
+        lengths_np = lengths.cpu().numpy().astype(np.int64)
+        fields[f"layer{index}.index_queries"] = view.index_queries.cpu().numpy().astype(np.float32)
+        fields[f"layer{index}.index_keys"] = view.index_keys.cpu().numpy().astype(np.float32)
         fields[f"layer{index}.selected"] = selected_np
         fields[f"layer{index}.lengths"] = lengths_np
         used = int(sum(int(x) for x in lengths_np))
