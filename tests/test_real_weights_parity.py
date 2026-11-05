@@ -1,4 +1,5 @@
 import logging
+import os
 from pathlib import Path
 
 import mlx.core as mx
@@ -10,7 +11,7 @@ from fusion_lsa.core.reference import build_buckets, read
 
 logger = logging.getLogger(__name__)
 
-VECTORS = Path("models/nlsa-checkpoint/vectors.npz")
+VECTORS = Path(os.environ.get("LSA_VECTORS", "models/nlsa-checkpoint/vectors.npz"))
 
 
 def _meta(data: dict, name: str) -> int:
@@ -103,3 +104,26 @@ def test_real_weights_budget_respected(vectors):
         else:
             assert got_lengths[row] <= top_k + window_size + sink_size
     logger.info("early-budget lengths: %s", got_lengths.tolist())
+
+
+QWEN_MAP = Path("models/maps/qwen38_27b__long-16k-1M-heavy-key-and-query-d2048.safetensors")
+
+
+def test_qwen38_27b_map_projects_real_vectors(vectors):
+    from fusion_lsa.convert.map_converter import LsaMap
+
+    if not QWEN_MAP.exists():
+        pytest.skip("converted Qwen3.8-27B map not present")
+    data = vectors
+    prefixes = sorted(key.split(".")[0] for key in data if key.startswith("layer") and key.endswith(".index_keys"))
+    loaded = LsaMap(str(QWEN_MAP), model_arch="qwen38_27b", num_layers=64, latent_dim=768)
+    keys = mx.array(data[f"{prefixes[0]}.index_keys"])
+    queries = mx.array(data[f"{prefixes[0]}.index_queries"])
+    assert keys.shape[-1] == 768, f"index space is {keys.shape[-1]} dims, the map reads 768"
+    q_idx, k_idx = loaded.project(int(prefixes[0][5:]), queries, keys)
+    assert q_idx.shape[-1] == loaded.index_dim and k_idx.shape[-1] == loaded.index_dim
+    from fusion_lsa.core.reference import check_unit_rows
+
+    check_unit_rows("q", q_idx.reshape(-1, loaded.index_dim))
+    check_unit_rows("k", k_idx.reshape(-1, loaded.index_dim))
+    logger.info("map projection ok: %s -> %s", keys.shape, k_idx.shape)
