@@ -43,6 +43,7 @@ def main() -> None:
     parser.add_argument("--layers", default="", help="comma-separated decoder layers, default all full-attention")
     parser.add_argument("--device", default="cpu", help="torch device, e.g. cpu or mps")
     parser.add_argument("--dtype", default="float32", help="checkpoint dtype, e.g. float32 or bfloat16")
+    parser.add_argument("--save-kv", action="store_true", help="also dump attention k/v heads and rotated queries per layer")
     args = parser.parse_args()
 
     sys.path.insert(0, upstream_path())
@@ -157,6 +158,12 @@ def main() -> None:
             used / max(len(lengths_np), 1),
             width,
         )
+        if args.save_kv:
+            # rotated heads straight off the teacher view - attention math needs no extra RoPE
+            fields[f"layer{index}.attn_q"] = view.q.cpu().numpy().astype(np.float16)
+            fields[f"layer{index}.attn_k"] = view.k.cpu().numpy().astype(np.float16)
+            fields[f"layer{index}.attn_v"] = view.v.cpu().numpy().astype(np.float16)
+            fields[f"meta.attention_scale"] = np.array(float(reader.attention.scaling))
         del captured[index]
 
     out = Path(args.out)
