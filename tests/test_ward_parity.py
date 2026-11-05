@@ -1,5 +1,6 @@
 import logging
 
+import mlx.core as mx
 import pytest
 
 from fusion_lsa.core.ward import members_from_labels, pool_keys, ward_merge, ward_rounds
@@ -80,3 +81,9 @@ def test_members_from_labels_parity(torch_ward):
     got = members_from_labels(to_mlx(labels_t), 3, 4)
     want = torch_ward.members_from_labels(labels_t, 3, 4)
     assert to_numpy(got).tolist() == want.tolist()
+
+
+def test_members_from_labels_rejects_oversized_bucket():
+    labels = mx.zeros((5,), dtype=mx.int32)
+    with pytest.raises(ValueError, match="cap"):
+        members_from_labels(labels, 1, 4)
