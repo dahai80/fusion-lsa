@@ -121,16 +121,20 @@ def main() -> None:
         reader = model_adapter.attention_class(text_model.layers[index].self_attn, indexer, rotary)
         with torch.no_grad():
             view = reader.teacher_view(hidden, positions, position_embeddings)
+            # The torch reference is the CPU oracle - run it on host tensors
+            host_keys = view.index_keys.cpu()
+            host_queries = view.index_queries.cpu()
+            host_positions = positions.cpu()
             buckets = torch_reference.build_buckets(
-                view.index_keys,
+                host_keys,
                 indexer.pool_size,
                 indexer.bucket_size,
                 indexer.bucket_cap,
                 indexer.window_size,
             )
             selected, lengths = torch_reference.read(
-                view.index_queries,
-                positions,
+                host_queries,
+                host_positions,
                 buckets,
                 indexer.top_p,
                 indexer.top_k,
