@@ -8,7 +8,8 @@ bucket，query 对 bucket 质心打分，取 top-p 个 bucket 展开成 top-k ke
 [latent-sparse-attention](https://github.com/Prefrontal-AI/latent-sparse-attention) 的 plain-torch
 参考实现，并以其为 oracle 做一致性对拍。
 
-状态：P0（算法移植 + 对拍 + 成本闸门）完成，P1（打包、map 转换器、checkpoint 端到端）进行中。
+状态：P0（算法移植 + 对拍 + 成本闸门）完成。P1 进行中：已发布 map 转换器（GLM-5.3-Flash、
+Qwen3.8-27B）、index 空间移植、页边界增量索引、真实 checkpoint 端到端。
 详见 `docs/p0-report.md`。
 
 ## P0 结果（M5 Max 128GB）
@@ -22,8 +23,12 @@ bucket，query 对 bucket 质心打分，取 top-p 个 bucket 展开成 top-k ke
 ```
 src/fusion_lsa/
   core/         ward.py, reference.py — oracle 选择逻辑的 MLX 移植
+                index_space.py — regroup、rownorm、学习投影
+  convert/      map_converter.py — 已发布 .pt 索引 map 转 safetensors（fail-loud LsaMap）
+  index/        incremental.py — 页边界 bucket 索引（与批量构建等价的契约测试）
   evaluation/   selection_bench.py — 分块选择成本 bench
-tests/          oracle 对拍 + 128k 端到端
+scripts/        extract_nlsa_vectors.py — torch 侧真实 checkpoint 向量提取
+tests/          oracle 对拍 + 128k 端到端 + 真实权重对拍
 docs/           P0 报告、bench 结果与日志
 ```
 

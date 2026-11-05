@@ -10,8 +10,9 @@ repo ports the selection logic (not the CUDA kernels) from the
 [latent-sparse-attention](https://github.com/Prefrontal-AI/latent-sparse-attention) plain-torch
 reference, parity-tested against it as an oracle.
 
-Status: P0 (algorithm port + parity + cost gate) complete. P1 (packaging, map converter,
-checkpoint e2e) next. See `docs/p0-report.md`.
+Status: P0 (algorithm port + parity + cost gate) complete. P1 in progress: released map converter
+(GLM-5.3-Flash, Qwen3.8-27B), index space port, page-boundary incremental index, real-checkpoint
+e2e. See `docs/p0-report.md`.
 
 ## Results (P0, M5 Max 128GB)
 
@@ -25,8 +26,12 @@ checkpoint e2e) next. See `docs/p0-report.md`.
 ```
 src/fusion_lsa/
   core/         ward.py, reference.py — MLX port of the oracle selection logic
+                index_space.py — regroup, rownorm, learned projections
+  convert/      map_converter.py — released .pt indexer maps to safetensors (fail-loud LsaMap)
+  index/        incremental.py — page-boundary bucket index (batched-equivalence contract)
   evaluation/   selection_bench.py — per-block selection cost bench
-tests/          oracle parity + 128k end-to-end
+scripts/        extract_nlsa_vectors.py — torch-side real-checkpoint vector extraction
+tests/          oracle parity + 128k end-to-end + real-weights parity
 docs/           P0 report, bench results and logs
 ```
 
