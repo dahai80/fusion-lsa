@@ -39,19 +39,29 @@ def main() -> None:
     parser.add_argument("--checkpoint", required=True, help="extracted HF checkpoint directory")
     parser.add_argument("--out", required=True, help="output npz path")
     parser.add_argument("--tokens", type=int, default=DEFAULT_TOKENS, help="document length")
-    parser.add_argument("--queries", type=int, default=DEFAULT_QUERY_COUNT, help="sampled query count")
-    parser.add_argument("--layers", default="", help="comma-separated decoder layers, default all full-attention")
+    parser.add_argument(
+        "--queries", type=int, default=DEFAULT_QUERY_COUNT, help="sampled query count"
+    )
+    parser.add_argument(
+        "--layers", default="", help="comma-separated decoder layers, default all full-attention"
+    )
     parser.add_argument("--device", default="cpu", help="torch device, e.g. cpu or mps")
-    parser.add_argument("--dtype", default="float32", help="checkpoint dtype, e.g. float32 or bfloat16")
-    parser.add_argument("--save-kv", action="store_true", help="also dump attention k/v heads and rotated queries per layer")
+    parser.add_argument(
+        "--dtype", default="float32", help="checkpoint dtype, e.g. float32 or bfloat16"
+    )
+    parser.add_argument(
+        "--save-kv",
+        action="store_true",
+        help="also dump attention k/v heads and rotated queries per layer",
+    )
     args = parser.parse_args()
 
     sys.path.insert(0, upstream_path())
+    from lsa.core import reference as torch_reference
     from lsa.evaluation import adapter
     from lsa.evaluation.config import ModelConfig
     from lsa.sglang.settings.design import IndexerConfig
     from lsa.training.distillation.data.teacher_capture import capture_layer_inputs
-    from lsa.core import reference as torch_reference
 
     checkpoint = Path(args.checkpoint)
     if not checkpoint.is_dir():
@@ -66,7 +76,7 @@ def main() -> None:
         from lsa.evaluation.adapter.model import torch_dtype
 
         def load_then_move(config, device, attention="sdpa", span=None):
-            from transformers import AutoTokenizer, AutoModelForCausalLM
+            from transformers import AutoModelForCausalLM, AutoTokenizer
 
             model = AutoModelForCausalLM.from_pretrained(
                 config.checkpoint,
@@ -81,7 +91,7 @@ def main() -> None:
             return model.to(device), AutoTokenizer.from_pretrained(config.checkpoint)
 
         model_adapter.load = load_then_move
-    model, tokenizer = model_adapter.load(model_config, args.device, attention="sdpa")
+    model, _ = model_adapter.load(model_config, args.device, attention="sdpa")
     text_model = model_adapter.text_model(model)
     text_config = model_adapter.text_config(model_config)
     every_layer = model_adapter.full_attention_layers(text_config, model_config)
@@ -159,11 +169,16 @@ def main() -> None:
             width,
         )
         if args.save_kv:
-            # rotated heads straight off the teacher view - attention math needs no extra RoPE
-            fields[f"layer{index}.attn_q"] = view.q.cpu().numpy().astype(np.float16)
-            fields[f"layer{index}.attn_k"] = view.k.cpu().numpy().astype(np.float16)
-            fields[f"layer{index}.attn_v"] = view.v.cpu().numpy().astype(np.float16)
-            fields[f"meta.attention_scale"] = np.array(float(reader.attention.scaling))
+            # rotated heads straight off the teacher view - attention math needs no extra RoPE.
+            # TeacherView carries no v, so collect the value heads from the slices directly
+            values = []
+            with torch.no_grad():
+                for piece in reader.teacher_slices(hidden, positions, position_embeddings):
+                    values.append(piece.projection.v[0].float().cpu())
+            fields[f"layer{index}.attn_q"] = view.q.float().cpu().numpy().astype(np.float16)
+            fields[f"layer{index}.attn_k"] = view.k.float().cpu().numpy().astype(np.float16)
+            fields[f"layer{index}.attn_v"] = torch.cat(values, dim=1).numpy().astype(np.float16)
+            fields["meta.attention_scale"] = np.array(float(reader.attention.scaling))
         del captured[index]
 
     out = Path(args.out)
