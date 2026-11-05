@@ -2,8 +2,11 @@
 
 Date: 2026-11-05. Logs: `docs/logs/bench-p0-dim{64,512}.log`. Machine: Apple M5 Max, 128 GB unified memory, mlx 0.31.2, fp32.
 
-Method: `python -m fusion_lsa.evaluation.selection_bench`. Oracle row-loop `read` port (lazy MLX, one
-`mx.eval` per batch), bucket table built once per run. Knobs follow the upstream served flat config:
+Method: `python -m fusion_lsa.evaluation.selection_bench`. Oracle row-loop `read` port (lazy MLX, but
+`read` syncs per row via `positions.tolist()` and the per-row mask count — the 64 decode queries are
+64 sequential GPU round-trips, and that per-row sync is the real cost driver behind the 0.7-1.0 ms
+figure). Bucket table built once per run; no warmup pass, first-eval kernel compilation lands in the
+decode numbers. Knobs follow the upstream served flat config:
 cluster block 512, pool 4, bucket 8, cap 16, top_k 2048, top_p 512, window 512, sink 4, 131,072 keys
 (16,384 buckets, 256 blocks).
 
@@ -14,8 +17,11 @@ cluster block 512, pool 4, bucket 8, cap 16, top_k 2048, top_p 512, window 512, 
 | build_buckets (128k keys) | 7.2s | 14.8s |
 | decode selection, row loop | 1,021 us/query | 727 us/query |
 | decode selections/s, single stream | ~980 | ~1,380 |
-| prefill block selection (512 queries, row loop) | 258 us/query, 33.8s projected per 128k | 280 us/query, 36.8s projected per 128k |
+| prefill block selection (512 queries, row loop) | 258 us/query, 33.8s upper bound per 128k* | 280 us/query, 36.8s upper bound per 128k* |
 | batched scoring + top-p (512 queries, no expansion) | 9.4 ms/block | 4.3 ms/block |
+
+\* upper bound: the measured block sits at context end with full 16k-bucket visibility; real prefill
+blocks average roughly half the visible buckets.
 
 ## Reading
 
