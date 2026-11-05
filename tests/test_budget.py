@@ -41,3 +41,13 @@ def test_early_budget_read_from_mapping():
         EarlyBudget.read({"position": 8192, "top_k": 1024})
     with pytest.raises(ValueError, match="mapping"):
         EarlyBudget.read([1, 2, 3])
+
+
+def test_budget_at_early_parity(upstream_src):
+    from lsa.budget import EarlyBudget as TorchEarlyBudget
+    from lsa.budget import budget_at as torch_budget_at
+
+    early = EarlyBudget(position=2048, top_k=1024, top_p=256)
+    torch_early = TorchEarlyBudget(position=2048, top_k=1024, top_p=256)
+    for position in (0, 1, 511, 512, 2047, 2048, 2049, 4096, 100000):
+        assert budget_at(position, 4096, 1024, early) == torch_budget_at(position, 4096, 1024, torch_early)
