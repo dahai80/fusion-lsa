@@ -83,11 +83,11 @@ Future perf claims must use same-session A/B runs.
   decode path dequantizes the full per-layer cache every step. Next step:
   dequantize only on page boundaries + cache dequantized pages, or gather
   from packed state via a take_along_axis-aware dequant kernel.
-- TQ conversion skips the memory-aware cache stack: with the default
-  memory-aware cache (`SizedArraysCache`/`ArraysCache` layers) the
-  scheduler converts 0 layers and serving silently stays fp16. Pre-existing
-  gap for all TQ serving under that config, not LSA-specific; the bench
-  above ran with `--no-memory-aware-cache` to get plain KVCaches.
+- ~~TQ conversion skips the memory-aware cache stack~~ — withdrawn on
+  re-test: with the default memory-aware cache both fresh requests
+  (ArraysCache list) and prefix-cache restores (SizedArraysCache list)
+  convert 15/64 layers and serve correctly. `--no-memory-aware-cache` is
+  not required.
 - Boot log prints the stale line "TurboQuant KV cache auto-enabled (4-bit)"
   right after the coexistence line; cosmetic.
 - `test_turboquant_kvcache_state.py` (28 cases) fails on the pinned
