@@ -115,3 +115,19 @@ are linear on that branch: 7cc2b483..a5ea979d..8615b926. Branch naming left to t
 - Ruling: 1M-tier work (paged KV + SSD offload + chunked-prefill resume) NOT started in
   this session — cost state critical (~$80) and P3 is a 1-2 week multi-component effort
   needing a fresh session. P4 docs partially done: fusion-mlx README LSA section added.
+- Final: minor (deferred): CHANGELOG not updated for the LSA branch — repo convention
+  ties entries to version bumps + issue numbers (0.10.50 style); the LSA work has no
+  issue number yet. File the issue first, then the entry.
+
+## P3 premise step 2: TQ outlier behavior at 32k (2026-11-06)
+
+- Re-extracted real attention K/V at 32k from the 27B checkpoint (torch/MPS forward,
+  ~55 min; fast path unavailable without flash-linear-attention), probed all 16
+  full-attention layers (docs/tq-kv-probe-27b-32k.md; intermediate 3.3GB npz removed).
+- 8-bit TQ is length-stable: agreement 0.989-0.993, drift <=0.003 at every layer —
+  matches 4k. 4-bit borderline (agreement 0.83-0.91), 2-bit unusable. No outlier
+  accumulation with length.
+- P3 path fixed: fp16 KV to 128k validated end-to-end; 8-bit TQ as the 1M compression
+  (64GB bf16 KV -> 32GB, fits 102GB budget). Remaining P3: TQ serving integration
+  (LSA reads dequantized rows), paged KV + SSD cold tier, chunked-prefill resume.
+- Fixed tq_kv_probe.py report-writer syntax bug (stray paren made a string call).
