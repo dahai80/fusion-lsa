@@ -156,3 +156,88 @@ Findings (new, ledgered):
 - Repo env drift found: venv had stale non-editable fusion-mlx 0.10.40; fixed with pip install -e (now 0.10.50 editable). mlx stayed 0.31.2 per requirements.lock (mlx-vlm pip install attempted to bump to 0.32.4 — blocked, --no-deps used).
 
 Artifacts: docs/p3-tq-lsa-coexistence-27b.md (this repo). Next P3 steps: page-granular dequant caching (perf), ArraysCache TQ conversion gap, then chunked-prefill/paged-KV scoping.
+
+## P3 perf step (2026-11-06, commits 2d99afa fusion-mlx worktree / bd2f985 fusion-lsa)
+
+Perf investigation of LSA decode (16k needle, control dense 10.2 tps same flags):
+- Ruled out: LSA_SELECT_LOG (1.58 without vs 1.85 with), spec-decode (ON measured 2.1 — hurts, not explains P2 8.3), full per-step dequantize (+9% only once fixed).
+- Root causes found and fixed (fusion-mlx worktree 2d99afa):
+  1. Concat-growth of fp16 dequant rows re-copied whole history every step (~2 GB/step at 16k over 16 layers) — replaced with preallocated buffer, capacity doubling, buffer writes touch only new rows.
+  2. kept_count `.item()` sync per step per layer — replaced with clamp + additive mask on read()'s -1 padding (no GPU sync).
+  3. Tail `_dedupe_sorted` synced and was a no-op safeguard (read picks disjoint from tail; duplicates don't change softmax) — removed.
+  4. IncrementalBucketIndex.buckets() re-concatenated all closed blocks every step (fusion-lsa bd2f985) — concat cached, invalidated on append.
+- Unit: fusion-mlx LSA/TQ suites 55/55; fusion-lsa suite 47/47 (+3 skip). Full fusion-mlx unit run: 16658 pass, 3 fail (G5 vendor checksum + 2 fusion_gui — unrelated, pre-existing).
+
+E2E rebench (16k needle, all HIT): baseline 1.85 → buffer-fix 2.47 → sync-free 4.68 mean (runs 2.0-8). BUT follow-up A/B showed thermal throttling dominates: hot-machine reruns gave TQ 3.2/1.3/0.9 (mean 1.8) and hot fp16 1.3 — same range as pre-fix baseline. Per-run decode_tps on this machine is not comparable across time; only same-back-to-back runs are.
+
+Ruling: e2e tps deltas for these fixes are unproven (thermal noise > effect size); the fixes stand on the unit tests and the removed O(history)-per-step work (logically real, ~2 GB/step copies + 16 syncs/step). Any future perf claim must use same-session A/B, interleaved, or a non-thermally-bound metric.
+
+Reconciling P2's 8.3 tps @32k: not spec-decode (measured 2.1 with it ON); most plausibly a cool machine + fp16 path (no TQ dequant buffers). Untestable today — ledger as open question.
+
+Artifacts: docs/p3-tq-lsa-coexistence-27b.md updated with perf section.
+
+## P3 ArraysCache gap re-check (2026-11-06, after 2d99afa)
+
+Re-tested on the worktree build with default memory-aware cache (no --no-memory-aware-cache flag), Qwen3.8-27B, k8v4 + LSA:
+- First request (fresh make_cache list, cache_type=ArraysCache): "TurboQuant: converted 15/64" — conversion live.
+- Repeat requests via prefix-cache restore (cache_type=SizedArraysCache): still "converted 15/64", 3/3 needle HIT.
+
+Ruling: the earlier finding "memory-aware cache stack silently converts 0 layers" does NOT reproduce on this build — conversion works on both fresh and restored caches. Previous session's observation was likely a misread of a different failure (that boot may have lacked the make_turboquant_kv_cache refactor or had a radix-hit signature mismatch). Gap entry withdrawn; --no-memory-aware-cache is not required for LSA+TQ serving. Cost if wrong: someone keeps passing an unnecessary flag — harmless.
+
+Also noted: hot-machine repeats measured 0.8-0.9 tps at 4k (thermal), first request 5.3 — more thermal evidence, consistent with the thermal ruling.
+
+## P3 1M-memory blocker removed (2026-11-06, worktree commit 4631939a)
+
+Memory math: holding a full fp16 dequantized copy of the KV cache costs
+K+V = 2 arrays x 4 kv heads x 256 dim x 2 bytes = 4 GB per full-attention
+layer at 1M tokens; 16 LSA layers = 64 GB — the 1M path could not carry
+the wrapper's dequant row cache. Fixed by gathering picked rows directly
+from the packed TurboQuant MSE state:
+- _gather_dequantize: take_along_axis on the time axis of norms [B,H,T]
+  and indices [B,H,T,G], dequantize only the picked rows (exactly matches
+  full dequantize, unit-tested); exposed on K8V4TurboQuantKVCache and
+  BatchTurboQuantKVCache (server wraps caches in the Batch class — first
+  e2e failed with AttributeError, caught by real-server validation).
+- Rebuild: chunked dequantize (4096 rows/chunk) feeds the selection index;
+  rows discarded — no whole-history fp16 copy at rebuild either.
+- Decode: per-step dequantize of picked rows only (read width, not cache
+  size); no row buffer state remains on the wrapper.
+
+Tests: LSA+TQ suites 52/52 (new: gather matches full dequantize; decode
+never calls full cache.dequantize after rebuild). E2E 16k needle 2/2 HIT,
+1.8 tps hot steady-state (thermal caveat applies). Ruling: full cache
+dequantize after rebuild is now a test-enforced regression.
+
+Remaining P3: chunked-prefill checkpoint/resume, memory budget hard gate,
+1M prefill acceptance run (compute-heavy, deferred to a cool-machine window).
+
+## Env drift incident (2026-11-06 16:27)
+
+A background `pip install mlx-vlm` task from earlier in the session completed late and silently replaced the pinned git install (f96138e, v0.5.0) with PyPI 0.7.12 — the version that regressed the #1244 masked-decode RHT fix. All e2e/unit results above ran BEFORE that install landed (task completed after the last bench at 16:16), so results stand. Reinstalled the pinned commit from the gh-proxy tarball (--no-deps); LSA/TQ suites 56/56 green after restore. Rule: no background pip installs against the shared venv; verify `pip show mlx-vlm` = 0.5.0 before TQ work.
+
+## P3 #4: memory budget hard gate — complete (2026-11-06)
+
+Worktree `fusion-mlx-lsa-wt`, commit `d4d71664`.
+
+- `patches/qwen35_lsa/budget.py`: `arm_lsa_memory_budget` — TQ-accurate KV
+  estimate (24832 B/token for Qwen3.8-27B: `(4*256*1.5 + 4*4) * 16`), doc
+  ceiling unified-memory x 0.85 unless a memory enforcer already set one,
+  guard `_prefill_memory_guard = True`. Reuses existing MemoryMonitor
+  override + PrefillMemoryExceededError handler.
+- Monitor model info missing at engine-setup time (scheduler init runs
+  before config populated; `model.config` absent, `model.args` = dict with
+  `text_config` dict). Fallback `_extract_dims` handles dict/namespace
+  configs, nested text_config, make_cache KVCache layer counting.
+  Ruling: arm extracts dims itself instead of patching scheduler init —
+  surgical, no init-order changes; cost: duplicated probe logic (~40 lines).
+- Engine tq_mode fix: `batched.py` now uses `_effective_turboquant_mode()`
+  (scheduler_config CLI flag first). Prior e2e "k8v4" runs actually served
+  4-bit v4 keys; HITs unaffected (4-bit agreement 0.83-0.91).
+- Verified live on Qwen3.8-27B :11555: `TurboQuant K8V4 mode: keys
+  quantized at 8 bits` + `LSA memory budget armed: ceiling 108.8 GB, KV
+  ~24832 B/token, weights 50.1 GB, max context ~2538048 tokens`; conversion
+  `mode=k8v4` (15/64 layers); 0 guard rejections; 4k needle 2/2 HIT,
+  accuracy 1.0.
+- Tests: `test_qwen35_lsa_budget.py` 11/11 (incl. dict-args fallback +
+  hybrid make_cache counting), cli 12/12, budget math asserts 1M fits
+  (2.5M headroom). Full LSA/TQ unit set 74/74.

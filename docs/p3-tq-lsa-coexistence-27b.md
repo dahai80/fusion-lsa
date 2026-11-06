@@ -91,6 +91,35 @@ step work plus unit tests. P2's 8.3 tps @32k is not explained by spec-decode
 (measured 2.1 with it on); most plausibly a cool machine plus the fp16 path.
 Future perf claims must use same-session A/B runs.
 
+## Memory budget hard gate (P3 #4, commit `d4d71664`)
+
+`patches/qwen35_lsa/budget.py` arms the existing prefill memory guard
+(`PrefillMemoryExceededError`) for LSA+k8v4 serving:
+
+- KV bytes-per-token override matches the packed TQ state — 24832 B/token
+  for Qwen3.8-27B (K 8-bit indices + V 4-bit indices + fp16 norms, 16
+  full-attention layers). The monitor's fp16 formula overestimates ~12x
+  and would falsely reject long contexts.
+- Ceiling = unified memory x 0.85 (migration-plan budget contract), set
+  only when no memory enforcer already chose one; the guard flag is then
+  turned on.
+- The scheduler's memory monitor has no model info at engine-setup time
+  (scheduler init runs before the model config is populated), so the arm
+  extracts dims from `model.config`/`model.args` itself — dict or
+  namespace, nested `text_config`, `make_cache`-based KVCache layer
+  counting for hybrid models.
+- The engine now resolves the TQ mode via `_effective_turboquant_mode()`
+  (CLI `scheduler_config` first). Previously only `model_settings` was
+  read, so `--kv-cache-turboquant k8v4` served 4-bit keys while the boot
+  log claimed k8v4.
+
+Live verification (Qwen3.8-27B, port 11555): both `TurboQuant K8V4 mode`
+and `LSA memory budget armed: ceiling 108.8 GB, KV ~24832 B/token, weights
+50.1 GB, max context ~2538048 tokens` appear at boot; conversion logs
+`mode=k8v4` (15/64 layers); 4k needle 2/2 HIT, accuracy 1.0, zero guard
+rejections. Acceptance math: 1M-token context needs ~24.8 GB KV vs ~58 GB
+headroom — fits with >2x margin.
+
 ## Known limits / follow-ups
 
 - Decode tps dropped vs fp16 LSA serving (8.3 tok/s at 32k in P2): the LSA
