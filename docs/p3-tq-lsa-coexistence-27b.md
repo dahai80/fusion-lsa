@@ -47,6 +47,36 @@ including new tests: k8v4 mode reaches codecs (key_codec.bits == 8), LSA
 decode runs on a real converted TurboQuant cache with correct key_count,
 flag-over-settings precedence, settings coexistence allowed.
 
+## Decode perf work (same day, commits `2d99afa` worktree / `bd2f985` fusion-lsa)
+
+Profiling the 1.85 tps decode (control dense: 10.2 tps, same flags) found
+three per-step costs, all fixed:
+
+- The fp16 dequant row cache grew by `mx.concatenate` every step, re-copying
+  the whole history each token (~2 GB/step at 16k over 16 layers). Replaced
+  with a preallocated buffer (capacity doubling); writes touch only new rows.
+- `select()` synced on a `kept_count` `.item()` per step per layer. `read()`'s
+  -1 padding is now clamped to row 0 and masked out of the softmax
+  (additive mask), keeping decode GPU-sync free.
+- Tail dedupe (`_dedupe_sorted`) synced and was redundant: read picks sit
+  inside closed pages and the tail is everything past them (disjoint), and
+  duplicate rows would not change the softmax anyway. Removed.
+- `IncrementalBucketIndex.buckets()` (fusion-lsa) re-concatenated every
+  closed block's arrays on each call — once per decode step per layer. The
+  concat is now cached and invalidated on page append.
+
+Correctness held end-to-end after each fix (16k needle, 8/8 HIT across
+configs; unit suites 55/55 fusion-mlx LSA/TQ, 47/47 fusion-lsa).
+
+Measurement caveat, ledgered as a ruling: sustained decode on this machine
+thermal-throttles hard — the same config measured 4.7 tps mean on a cool
+machine and 1.8 tps hot, and hot fp16-LSA (no TQ) measured 1.3. Per-run
+decode_tps is only comparable within one back-to-back session, so the e2e
+delta of these fixes is unproven; they stand on the removed O(history)-per-
+step work plus unit tests. P2's 8.3 tps @32k is not explained by spec-decode
+(measured 2.1 with it on); most plausibly a cool machine plus the fp16 path.
+Future perf claims must use same-session A/B runs.
+
 ## Known limits / follow-ups
 
 - Decode tps dropped vs fp16 LSA serving (8.3 tok/s at 32k in P2): the LSA
