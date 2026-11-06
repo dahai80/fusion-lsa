@@ -47,14 +47,13 @@ including new tests: k8v4 mode reaches codecs (key_codec.bits == 8), LSA
 decode runs on a real converted TurboQuant cache with correct key_count,
 flag-over-settings precedence, settings coexistence allowed.
 
-## Decode perf work (same day, commits `2d99afa` worktree / `bd2f985` fusion-lsa)
+## Decode perf + 1M-memory work (same day, commits `2d99afa`, `4631939a` worktree / `bd2f985` fusion-lsa)
 
 Profiling the 1.85 tps decode (control dense: 10.2 tps, same flags) found
 three per-step costs, all fixed:
 
 - The fp16 dequant row cache grew by `mx.concatenate` every step, re-copying
-  the whole history each token (~2 GB/step at 16k over 16 layers). Replaced
-  with a preallocated buffer (capacity doubling); writes touch only new rows.
+  the whole history each token (~2 GB/step at 16k over 16 layers).
 - `select()` synced on a `kept_count` `.item()` per step per layer. `read()`'s
   -1 padding is now clamped to row 0 and masked out of the softmax
   (additive mask), keeping decode GPU-sync free.
@@ -65,8 +64,23 @@ three per-step costs, all fixed:
   closed block's arrays on each call — once per decode step per layer. The
   concat is now cached and invalidated on page append.
 
-Correctness held end-to-end after each fix (16k needle, 8/8 HIT across
-configs; unit suites 55/55 fusion-mlx LSA/TQ, 47/47 fusion-lsa).
+Then the row cache itself was removed entirely: at 1M tokens a full fp16
+dequantized copy of the KV cache costs K+V = 4 GB per full-attention layer
+(4 kv heads x 256 dim x fp16), 16 layers = 64 GB — the 1M path cannot carry
+it. Instead (`4631939a`):
+
+- `gather_dequantize` reads the picked rows straight from the packed
+  TurboQuant MSE state (`take_along_axis` on the time axis of norms and
+  indices) and dequantizes only those rows — exactly matching a full
+  dequantize (unit-tested). Exposed on both the k8v4 cache and the Batch
+  wrapper the scheduler installs.
+- The rebuild feeds the selection index from chunked dequantizes
+  (4096 rows/chunk, rows discarded after the index consumes them) — no
+  whole-history fp16 copy at rebuild either. A full `cache.dequantize()`
+  call after rebuild is now a test-enforced regression.
+
+Correctness held end-to-end throughout (16k needle 2/2 HIT on the final
+build; unit suites 52/52 fusion-mlx LSA/TQ, 47/47 fusion-lsa).
 
 Measurement caveat, ledgered as a ruling: sustained decode on this machine
 thermal-throttles hard — the same config measured 4.7 tps mean on a cool
