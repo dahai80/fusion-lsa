@@ -241,3 +241,34 @@ Worktree `fusion-mlx-lsa-wt`, commit `d4d71664`.
 - Tests: `test_qwen35_lsa_budget.py` 11/11 (incl. dict-args fallback +
   hybrid make_cache counting), cli 12/12, budget math asserts 1M fits
   (2.5M headroom). Full LSA/TQ unit set 74/74.
+
+## P3 #3: chunked prefill + prefix cache reuse — partial (2026-11-06)
+
+Worktree `fusion-mlx-lsa-wt`, commit `e51bd0bd`.
+
+Existing machinery verified, no new build needed:
+- Chunked prefill exists (sched_batch `_step_prefill_chunk`); LSA page
+  growth already closes whole pages only (selection.append_keys).
+- Prefix cache reuse works end-to-end for plain LSA fp16: 16k bench
+  repeat 2 hit 12288 cached tokens, wall 32.5s -> 17.4s, needle 2/2 HIT.
+- Index rebuild on prefix restore is unit-covered (radix hit, extend/
+  filter re-arm) and chunked at 4096 rows.
+
+Bug found + fixed (`e51bd0bd`): BatchTurboQuantKVCache.merge lost the
+K8V4 subclass and extract(idx) (mlx_lm BatchGenerator, request
+completion) returned base TurboQuantKVCache, so k8v4 blocks were stored
+with "TurboQuantKVCache" metadata and every later prefix lookup
+mismatched the K8V4 expected signature. merge propagates key_bits;
+extract rebuilds the concrete subclass. Unit test RED->GREEN
+(test_batch_extract_preserves_k8v4_subclass); TQ+LSA suites 76/76.
+
+OPEN (next session): under k8v4 the boundary-snapshot/SSD store path
+drops the 15 TQ layers - blocks stored with num_layers=49 vs expected 64
+("Cache layer count mismatch: block has 49 layers"), prefix hits
+invalidated, cached_tokens stays 0. fp16 unaffected. Evidence:
+/tmp/lsa-tq-prefix.log (18:13-18:16). The block store path handles TQ
+packed state ("__turboquant_v2__", TurboQuantMSEState in file metadata)
+but the boundary snapshot capture/serialize path skips TQ layers as
+"sliceable". Fix = serialize TQ norms+indices in boundary snapshots and
+restore them as K8V4 caches. Both signature and layer-count guards
+correctly refuse the broken blocks - no corruption served.
