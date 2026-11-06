@@ -131,3 +131,28 @@ are linear on that branch: 7cc2b483..a5ea979d..8615b926. Branch naming left to t
   (64GB bf16 KV -> 32GB, fits 102GB budget). Remaining P3: TQ serving integration
   (LSA reads dequantized rows), paged KV + SSD cold tier, chunked-prefill resume.
 - Fixed tq_kv_probe.py report-writer syntax bug (stray paren made a string call).
+
+## P3 step 1: TQ k8v4 + LSA serving coexistence (2026-11-06)
+
+Scope: fusion-mlx branch `fix/mac-app-compile-pbxproj` (LSA line now tip 3f4bc88; another session organized the LSA commits onto this branch and rebased to v0.10.50 main + checksum regen; `feat/lsa-qwen35-adapter` exists but stale at a5ea979d).
+
+Shipped (commits 35e1be6, f8e7157, 3f4bc88):
+- K8V4TurboQuantKVCache: k8v4 mode never reached the codecs on the pinned mlx_vlm (single bits knob, keys quantized at 4 bits while boot log claimed K=8). Subclass builds key codec at 8 bits; SSD codec rebuild honors key_bits; sched convert/empty sites use make_turboquant_kv_cache helper.
+- LSA wrapper TQ-aware: rebuild reads cache.dequantize() rows (proxy only supports contiguous time slices, gather must be fp16); decode gather dequantize-then-attend; _observe_cache sentinel for shapeless quantized states.
+- Guards: serve requires k8v4 for LSA+TQ; quantized-dtype guard skipped when TQ owns the cache; CLI flag counts as operator-explicit (wins over settings-file false); engine auto-TQ still stands down under LSA; model_settings mutual exclusion dropped.
+
+E2E (Qwen3.8-27B, real server, fresh boot, TQ conversion live "converted 15/64 cache layers"):
+- 4k 2/2 HIT (decode 2.18 tps), 16k 2/2 HIT (decode 1.85 tps). Selection index exact: key_count 3072/13312.
+- Unit: LSA suites 30/30, TQ suite 41/41 on pinned mlx_vlm (git commit f96138e, installed via gh-proxy mirror — github.com unreachable directly; PyPI mlx-vlm 0.7.12 lacks the #1244 masked-decode fix AND regressed it).
+
+Rulings:
+- Ruling: coexistence gated to k8v4 only — 4-bit K probe agreement 0.83-0.91 breaks selection; v4 mode today quantizes keys at 4 bits despite "K stays FP16" boot log (pre-existing mislabel, separate issue).
+- Ruling: full per-step dequantize accepted for this step — correctness first; tps 8.3→~1.9 at 16k. Next P3 perf step: page-granular dequant caching.
+
+Findings (new, ledgered):
+- TQ conversion skips memory-aware cache stacks (ArraysCache/SizedArraysCache): converts 0 layers, serving silently fp16. Pre-existing, affects all TQ serving under default settings; bench used --no-memory-aware-cache.
+- Boot log contradiction: "auto-enabled (4-bit)" line after k8v4 coexistence line. Cosmetic.
+- test_turboquant_kvcache_state.py 28 failures pre-exist on clean tree (pinned mlx_vlm lacks from_kv_cache) — env mismatch, not a regression.
+- Repo env drift found: venv had stale non-editable fusion-mlx 0.10.40; fixed with pip install -e (now 0.10.50 editable). mlx stayed 0.31.2 per requirements.lock (mlx-vlm pip install attempted to bump to 0.32.4 — blocked, --no-deps used).
+
+Artifacts: docs/p3-tq-lsa-coexistence-27b.md (this repo). Next P3 steps: page-granular dequant caching (perf), ArraysCache TQ conversion gap, then chunked-prefill/paged-KV scoping.
