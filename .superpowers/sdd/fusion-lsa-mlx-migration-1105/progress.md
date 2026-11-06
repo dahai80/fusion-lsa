@@ -272,3 +272,30 @@ but the boundary snapshot capture/serialize path skips TQ layers as
 "sliceable". Fix = serialize TQ norms+indices in boundary snapshots and
 restore them as K8V4 caches. Both signature and layer-count guards
 correctly refuse the broken blocks - no corruption served.
+
+## P3 #3 continued: k8v4 block store/restore (2026-11-06, commits `6e46c45b`)
+
+- Instrumented store path: "Extracted 64 layer states from 64 live
+  caches" — extraction fine. Block metadata was inconsistent:
+  num_layers=49 but layer_cache_types had 64 entries (48 ArraysCache +
+  15 K8V4 + 1 KVCache). Root cause: prefix_cache block store/restore
+  branches match TQ by exact names; K8V4TurboQuantKVCache missed all
+  three sites, so the 15 packed layers were dropped from block DATA
+  while types stayed 64. Fixed (all 3 sites) + shape-consistency guard
+  in TQ restore (mixed v4/k8v4 packed widths refuse instead of crash).
+- After fix, clean-slate k8v4 run: block stores 64 layers; one repeat
+  hit 12288 cached_tokens earlier (18:34 run) proving reuse plumbing
+  works when blocks match.
+- NEW BLOCKER (open): with TQ layers restored, continued prefill
+  crashes in ArraysCache (linear-attention) layers — mlx_lm
+  update_and_fetch concatenate (1,4,12288,512) vs (1,4,1536,256).
+  Restored linear-layer state width 512 vs live chunk 256. Prefix
+  reuse under k8v4 blocked on this; fp16 path unaffected (fp16 reuse
+  verified: 12288 cached tokens, wall 32.5s -> 17.4s). Traceback:
+  qwen35_model.py -> attention.py:123 update_and_fetch. Next session:
+  compare restored ArraysCache state layout vs live append shape
+  (suspect store/restore packs linear state differently than the live
+  fused-recurrent op expects).
+- Stale SSD blocks from pre-fix v4/fp16 runs poisoned lookups (same
+  seed-42 prompt hashes); purged /Users/dahai/.fusion-mlx/ssd_cache
+  (regenerable process data).
