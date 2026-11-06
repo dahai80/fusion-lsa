@@ -101,3 +101,17 @@ decode 8.3-8.4 tok/s at 32k. LSA unit suite 29/29. Manifest refreshed, committed
 Note: fusion-mlx branch pointer moved mid-session (another session landed mac-app fixes
 c9ce2960/46c9f709 on the same line; branch now fix/mac-app-compile-pbxproj). LSA commits
 are linear on that branch: 7cc2b483..a5ea979d..8615b926. Branch naming left to the user.
+
+## P3 premise step 1: fp16 KV to 128k (2026-11-06)
+
+- 128k-word NIAH (106,782 tokens, needle at token 64068) on LSA server, bf16 KV:
+  exact-match HIT, index key_count exactly 106,496 (no pollution), selection ran every
+  step. Prefill ~10 min (~155 tok/s); decode 3.6 tok/s (top_p now cuts 13.3k buckets —
+  selection cost grows with length, expected).
+- Memory: system free 39% of 128GB with server resident (~78GB used total incl. weights
+  ~54GB + KV ~27GB + workspace) — inside the 102GB (120GB x 0.85) hard gate. fp16 tier
+  validated to 128k; TQ-on-latent-KV outlier study and SSD cold tier remain for the 1M
+  tier.
+- Ruling: 1M-tier work (paged KV + SSD offload + chunked-prefill resume) NOT started in
+  this session — cost state critical (~$80) and P3 is a 1-2 week multi-component effort
+  needing a fresh session. P4 docs partially done: fusion-mlx README LSA section added.
