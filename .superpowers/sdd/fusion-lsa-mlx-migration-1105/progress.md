@@ -599,3 +599,17 @@ cool start and today's machine ran a 9.6 h prefill + RULER suite.
 - Promotion deck v2 rebuilt same day (charts + 4-step LSA principle
   walkthrough, Huawei style) - docs/latent-spars-attention-mlx.{md,pptx},
   commits a842c97/af1c0a6.
+
+## 2026-11-07 19:35 — machine reboot killed v3 run; v3 restarted with durable logs
+
+- Machine rebooted ~17:28 (2 min after the last recorded memcheck at
+  643k/1095k); server process died, /tmp/lsa_ab/ wiped — serve log, bench
+  log, and everything past 643k lost. No final data for v3 attempt 1.
+- Losses are procedural, not scientific: mitigations were already
+  verified live before the crash (key chunk 8192, peak-active gap ~4.6 GB
+  vs ~28 GB in v2, zero enforcer events through 643k).
+- Hardening: long-run logs moved to ~/.fusion-mlx/logs/lsa-1m-v3-*.log
+  (durable; /tmp wiped on reboot). Memory note saved.
+- v3 attempt 2 launched 19:33: server PID 96296, bench PID 97495,
+  prompt ~1.315M words -> ~1.01M tokens, FUSION_MLX_SOFT_BUSY_EVICT_POLLS=120,
+  key chunk 8192. Same instrumentation. ETA ~10 h (~05:30 next morning).
