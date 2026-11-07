@@ -613,3 +613,10 @@ cool start and today's machine ran a 9.6 h prefill + RULER suite.
 - v3 attempt 2 launched 19:33: server PID 96296, bench PID 97495,
   prompt ~1.315M words -> ~1.01M tokens, FUSION_MLX_SOFT_BUSY_EVICT_POLLS=120,
   key chunk 8192. Same instrumentation. ETA ~10 h (~05:30 next morning).
+
+## 2026-11-08 07:40 — v3 attempt 2 outcome: machine panic at 999k (91.2%), 986k PASSED
+- v3 crossed v2 death point 986k cleanly (reached 999,424/1,095,638), zero enforcer evictions; chunk-8192 transient fix VERIFIED (peak-active ~4.5 GB steady vs ~28 GB v2).
+- Machine kernel panic 07:17:36: watchdogd starved 92 s, 33 swapfiles, stackshot partial — whole-machine memory saturation (run phys 105-106 GB + OS + bench client on 128 GB), not algorithm regression.
+- Enforcer facts measured: soft=102.0 / hard=114 / ceiling=120 GB. Soft crossed 07:13-07:14; busy-evict blocked (active request) + EVICT_POLLS=120 patience -> no relief before watchdog died.
+- Root causes to fix for v4: (1) enforcer ceiling too high for 128 GB unified memory — needs ~20 GB OS headroom (ceiling ~106/soft ~96/hard ~102); (2) no escalation when sustained soft AND climbing — EVICT_POLLS patience protects transients but is deadly at true saturation.
+- Doc pitfall added: machine-level swap storm. Panics: panic-full-2026-11-08-071736.0002.panic (today), none found for Nov 7 17:28 reboot (cause unconfirmed for that one).

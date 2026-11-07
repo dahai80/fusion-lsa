@@ -120,6 +120,16 @@ Ports are kernel-level, not algorithm-level. Checklist in dependency order:
    models on sustained soft pressure will kill long prefills that are
    healthy (chunk-side phys 89–103 GB vs 75.4 GB active). Instrument
    phys-vs-active per chunk before touching tiers.
+5b. **Enforcer ceiling must reserve OS headroom**: measured tiers on the
+   128 GB machine were soft=102 / hard=114 / ceiling=120 GB — only 8–14 GB
+   left for macOS + bench client. At 999k tokens the run held phys
+   105–106 GB, the whole machine went into a swap storm (33 swapfiles),
+   watchdogd starved 92 s, and the kernel panicked (07:17:36 reboot).
+   On unified memory, size the ceiling to ~106 GB (soft ~96 / hard ~102)
+   so the enforcer aborts the request before the OS dies. Patience
+   (`FUSION_MLX_SOFT_BUSY_EVICT_POLLS`) protects against transients but
+   needs escalation when soft pressure is sustained AND still climbing —
+   a flat 120 s wait is deadly at true saturation.
 6. **Sparsity is decode-only**: prefill stays O(T²) full attention per chunk
    (~10 h wall for 1M tokens on M5 Max; tail decays to 13–25 tok/s). A true
    1M product needs sparse prefill — separate design round.
@@ -137,21 +147,18 @@ Qwen3.8-27B, M5 Max 128 GB, k8v4 + LSA:
 | RULER single-needle (needle at end) | 4k/32k/128k HIT; completed-run accuracy 5/5 |
 | Prefix reuse | 32k wall 132 s fresh vs 56 s restored, `cached_tokens` confirmed |
 | Decode A/B at 32k (same session) | 1.5 tok/s LSA+k8v4 vs 6.8 tok/s full attention (~4.6x decode cost) |
-| Prefill memory (1M run) | active flat 50.4 -> 75.4 GB at 986k tokens, exact packed rate, zero hard-tier touches |
-| 1M prefill progress | 986k/1095k (90%) — blocked by enforcer eviction, not memory (mitigation landed, rerun in flight) |
+| Prefill memory (1M run v3) | active 50.4 -> 75.7 GB at 999k tokens, exact packed rate, zero enforcer evictions; peak-active transient ~4.5 GB steady (was ~28 GB before chunk 16384 -> 8192) |
+| 1M prefill progress | 999,424/1,095,638 (91.2%) — v2 death point 986k PASSED; run ended by machine-wide kernel panic (watchdogd starvation under swap storm), not by the serving engine |
 | Early conversion prefill speed | ~4.6x faster than fp16 in linear phase (600 vs 131 tok/s) |
 
 ## 7. Open Items
 
-- 1M final 4%: rerun with halved key chunk (8192) + widened enforcer
-  patience (`FUSION_MLX_SOFT_BUSY_EVICT_POLLS=120`) — instrumentation
-  (`[tq-prefill-route]`, `[memcheck:chunk]` with peak) landed first.
+- 1M final 8%: rerun (v4) with a machine-safe enforcer tier set
+  (ceiling ~106 / soft ~96 / hard ~102 GB) — chunk-8192 transient fix is
+  verified (986k passed); the remaining failure mode is whole-machine
+  saturation, so the enforcer must abort the request before macOS dies.
 - Sparse prefill (LSA read path during prefill): required for true 1M
   serving; needs its own design round.
 - LSA index rebuild at 128k (~780 s) now dominates prefill-side wall time.
 - Deferred minors: partial_rotary_factor probe, `--enable-lsa` no-op audit
   on VLM load paths, `_state_cache` pinning, rebuild churn.
-
-## 7. Open Items
-
-TODO
