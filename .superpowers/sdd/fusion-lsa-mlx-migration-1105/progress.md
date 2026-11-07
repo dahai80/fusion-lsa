@@ -299,3 +299,286 @@ correctly refuse the broken blocks - no corruption served.
 - Stale SSD blocks from pre-fix v4/fp16 runs poisoned lookups (same
   seed-42 prompt hashes); purged /Users/dahai/.fusion-mlx/ssd_cache
   (regenerable process data).
+
+## P3 #3 blocker narrowed: reconstruct mis-assembles hybrid layers (2026-11-06)
+
+Shape probe added at PREFIX-PREP reconstruct (sched_admission.py, info
+log "PREFIX-PREP restored shapes", gated >=8192 tokens). Live evidence:
+
+- Restored layer 3 (a K8V4 full-attention layer) comes back as PLAIN
+  KVCache with keys (1,4,12288,512) — wrong class and fused width
+  (2x256, keys+values concatenated on axis 3 somewhere in reconstruct).
+- Disk block layer 3 stores nested state keys "layer_3_state_0_sub_0"
+  (1,4,2048) / "layer_3_state_0_sub_1" (1,4,2048,64) — a nested
+  sub-state layout (norms+indices-like), NOT flat (k,v).
+- Final layer 63 stores flat state_0/state_1 (1,4,2048,256) each and
+  restores as expected.
+
+Conclusion: the block-store serializer writes hybrid layers (the
+model's per-layer cache is a CacheList of ArraysCache + TQ sub-caches)
+in a nested sub-state layout that the reconstruct path does not
+understand — it flattens into a KVCache with fused keys. The subsequent
+live prefill append then crashes (concatenate 512 vs 256).
+
+Next session: fix reconstruct for the nested sub-state layout (either
+serialize CacheList layers flat per sub-cache, or teach reconstruct to
+rebuild CacheList from sub-states). The store side already handles TQ
+slicing ("__turboquant_v2__"); suspect the mismatch is between the
+generic N-tuple store writer (nested "state_k_sub_j" keys) and the
+reader's flat state_count expectation.
+
+Probe left in place at info level (gated to long prefills) — useful
+until this is fixed, then drop to debug.
+
+Task P3 #3: complete (k8v4 prefix reuse fixed, commits eececf27..97b4204b,
+tests: pytest tests/unit/test_turboquant.py → 45/45; e2e 16k bench → 2/2 HIT)
+
+Root cause of the concat crash: the SSD restore branch dequantized stored
+k8v4 packed states through a plain TurboQuantKVCache, which has no
+key_bits — _rebuild_codecs fell back to bits=4 and inferred head_dim from
+the 8-bit packed width (64) as 64*32/4 = 512. Restored keys were
+(1,4,12288,512) vs live 256-wide keys.
+
+Fix: rebuild_dequantized_kv(cache_type_name, ...) in turboquant_kv.py
+picks the cache class from the stored layer type name (K8V4 → 8-bit key
+codecs); prefix_cache TQ restore branch now calls it. Probe log dropped
+to debug (evidence preserved in eececf27 message).
+
+Live verification (Qwen3.8-27B, port 11555, k8v4+LSA):
+- restored layer 3 shape now (1, 4, 12288, 256) - probe output
+- run 0: fresh prefill, HIT, wall 47.0s
+- run 1: cached_tokens=12288, HIT, wall 35.0s (prefix reuse working)
+- no concatenate crash; accuracy 1.0; decode_tps 1.9 both runs
+
+P3 #3 acceptance remaining: 1M-token real prefill run (P3 #5) on a cool
+machine per thermal ruling.
+
+Task P3 #5: partial - 1M prefill aborts at hard tier 424k tokens (2026-11-06)
+
+Run: length 1315000 words (~1.01M real tokens), needle-depth 1.0, k8v4+LSA,
+port 11555. New bench flag --needle-depth added (ruler32k_bench.py, 0.6
+default; 1.0 = end of context, verified needle at 0.986 of prompt).
+
+Chain of events (all guards performed as designed):
+- 400 preflight regression found and fixed first: enforce_context_length
+  resolved model context via getattr-only probing; live Qwen3.8-27B has
+  dict args/dict text_config so resolution fell to the tokenizer cap
+  (262144) and rejected the request pre-prefill. Fix e7144e5f:
+  dict probing + _lsa_max_context_tokens override published by the
+  budget arm (batched.py). Tests: test_lsa_context_limit.py 3/3;
+  context-guard suites 30/30 (3 xpasses pre-existing, stash-verified).
+- Prefill ran 19:34-20:28 (~131 tps, superlinear - quadratic attention
+  expected). metal_active 73.6GB@19:45 -> 79.0GB@20:09.
+- 20:28:33 memory_enforcer soft->hard: current 114.1 GB vs hard 114.0,
+  ceiling 120.0 (pool tier system, independent of the LSA budget gate).
+- 20:28:34 chunk guard warning: "Chunked prefill above max_bytes at
+  423936 tokens: 113.2GB > 101.6GB"; engine_core aborted the request;
+  clean unload cascade; post-eviction current 77.1 GB. Server survived.
+- Client got structured abort error. 0/1 hit (aborted at 424k of 1.01M).
+
+Accounting at 424k: weights 58.3 + KV 10.5 (424k x 24832 B) + LSA index
+~0.1 GB (bucket centroids/members are ~24 KB/page/layer - NOT the hog)
+= ~69 GB. Observed 114.1. ~45 GB unexplained, and +35 GB appeared in the
+final 19 min while KV only grew +3.5 GB -> superlinear transient growth
+in late prefill. Suspects: (a) chunk attention workspace over grown
+context (2048xctx fp16 attn matrix ~7 GB/layer at 424k), (b) LSA
+page-read/dequant buffers accumulating across layers, (c) phys_footprint
+charging something metal_active does not show. Chunk guard already does
+_sync_and_clear_cache per chunk (MEMFIX), so MLX buffer cache is ruled
+out as the main term.
+
+Next session: instrument before rerunning - log per-chunk
+mx.get_active_memory()/get_phys_footprint() + per-layer read buffer
+sizes at INFO in the chunked-prefill memcheck block (sched_batch.py
+~757), one rerun to ~450k, then target the dominant term. Do NOT raise
+the hard tier to brute-force 1M: 114 GB real pressure on 128 GB risks
+the kernel panic preflight warns about (#324).
+
+Also ledgered: bench --needle-depth flag is a permanent bench feature
+(fusion-lsa scripts/).
+
+Task P3 #5 diagnosis: prefill runs fp16 - TQ conversion is post-prefill (2026-11-06)
+
+Instrumented rerun (commit pending: per-chunk memcheck INFO line in
+sched_batch.py chunked step, gated to >65536-token prefills; logs
+active/cache/phys per chunk). Curve at 82k-token spacing:
+
+  tokens  active  cache  phys
+  2k      50.4    3.1    55.3
+  84k     55.4    8.1    65.3
+  248k    65.4    18.1   85.3
+  416k    75.6    0.0    110.9 (pressure-clear emptied cache)
+
+active grows 64 kB/token = 16 full-attn layers x 4 kB/token (fp16 K+V,
+4 heads x 256 x 2 tensors x 2 B) - this is the prefill KV cache itself.
+cache grows the same rate until the pressure clear frees it (churn
+pool, wired, counts in phys: phys = active + cache + ~2 GB constant).
+
+Root cause identified: the scheduler converts KVCache->TurboQuant AFTER
+prefill completes ("converted 15/64" fires post-prefill). During
+prefill the cache is plain fp16, so k8v4 saves ZERO prefill memory:
+1M tokens = 64 GB fp16 KV + 50 GB weights = the 114 GB abort at the
+hard tier. The packed 24.8 kB/token only applies to decode.
+
+Aborted again at 424k (usage 113.9 GB); enforcer CRITICAL "sustained
+soft pressure #1473 hard tier" evicted the busy model - guard chain
+again clean, server survived.
+
+Fix direction (P3 #3's page-growth protocol, now with numbers):
+quantize incrementally during prefill - either (a) run TQ layers as TQ
+from token 0 (turboquant_attention patch routes prefill SDPA to
+quantized kernels; needs verification that chunked prefill + prefix
+extraction tolerate live TQ layers), or (b) convert closed pages at
+page boundaries (2048 tokens) keeping only the current window fp16.
+(a) caps prefill KV at 24.8 kB/token -> 25 GB at 1M; (b) similar with
+a bounded fp16 window. Either lands 1M KV under ~30 GB, inside the
+108.8 GB budget with the 50 GB weights.
+
+Next session: decide (a) vs (b) by checking why post-prefill
+conversion exists (grep "converted 15/64" call site - is it a prefill
+attention correctness constraint or a historical artifact), then TDD
+the chosen path.
+
+Incident (2026-11-06 ~22:45): /Users/dahai/fusion/fusion-mlx-lsa-wt was
+deleted externally mid-session (not by this session). All 7 commits
+survived as loose objects in fusion-mlx/.git; branch
+fix/mac-app-compile-pbxproj recreated at 30ff3fcc and worktree re-added.
+Only loss: one uncommitted RED test file (restored from context).
+Cause unknown - flag if intentional.
+
+Task P3 #5: 1M prefill reached 986k/1095k (90%) - early TQ conversion
+lands, enforcer eviction blocks the last 4% (2026-11-07)
+
+Fix landed: early TurboQuant conversion (commit 839a86ba fusion-mlx).
+The per-chunk memcheck curve exposed that prefill ran fp16 end to end
+(TQ conversion was a post-prefill epilogue) - active memory grew
+64 kB/token and the 1M run died at the hard tier at 424k. Early
+conversion quantizes after the first chunk; prefill attention runs the
+quantized prefill_attention fast path.
+
+Live 1.096M-token run (port 11555, k8v4+LSA, --needle-depth 1.0):
+- active memory flat: 50.4 GB (chunk 1) -> 75.4 GB (986k tokens);
+  KV growth exactly the packed 24.7 kB/token rate throughout
+- quantized prefill ~4.6x faster than fp16 in the linear phase
+  (600 vs 131 tps); quadratic attention tail decayed to 13-25 tps
+- abort at 986k/1095k: #1473 sustained-soft enforcer eviction, NOT
+  memory exhaustion. Mechanism: deep-context chunk attention creates
+  ~28 GB transients over active (chunk-side phys 89-103 GB vs active
+  75.4), every ~70 s chunk; enforcer (1 s polls) read >102 GB soft
+  for 10 consecutive polls with no idle evictable model and evicted
+  the busy model. Chunk guard never fired (75 GB << 114 GB hard).
+- the bench needle never got a decode; accuracy untested at 1M length.
+
+1M acceptance blockers, in order of cost:
+1. Tier headroom for the end-of-prefill transient window (~28 GB over
+   active for the last ~100k tokens): either raise soft to ~106 GB /
+   widen enforcer patience, or shrink the deep-context attention
+   transient (smaller prefill_key_chunk_size in the TQ long-prefill
+   chunking). One rerun is ~10 h at current O(T^2) prefill - do NOT
+   rerun blind; instrument the transient first (log phys-vs-active
+   gap per chunk is already there; add per-op breakdown if needed).
+2. Architectural: prefill attention is still O(T^2) full attention
+   per chunk - LSA sparsity does not apply during prefill. A 1M
+   prefill costs ~10 h wall on this machine regardless of memory.
+   True 1M serving needs sparse prefill (LSA read path during
+   prefill) - candidate P4+ scope, needs its own design round.
+
+Rulings:
+- Early conversion outlier gate probes the first-chunk sample instead
+  of full history (#1423): key outliers are per-layer model properties;
+  a negative decision is final for the request. Cost if wrong: an
+  outlier layer that only manifests after ~10k tokens stays quantized -
+  needle tests at 4k/16k/32k cover the regression surface available.
+- P3 #5 "stable decode tps" acceptance is unmeasurable at 1M until
+  blocker 2 is addressed; the packed-rate memory curve (75 GB flat,
+  zero hard-tier touches by the chunk guard) is the verifiable part
+  and is delivered.
+
+P3 #5 remains open with 90% evidence; P4 next unless the 1M rerun is
+wanted first.
+
+Task P4: RULER suite (minus 1M) + issues filed (2026-11-07)
+
+RULER single-needle, needle-depth 1.0 (end of context), k8v4+LSA,
+port 11555, HOT machine (immediately after the 9.6 h 1M prefill run;
+thermal ruling: tps not comparable to earlier sessions):
+
+- 4k:    2/2 HIT, wall 25.3/23.1 s
+- 32k:   2/2 HIT, wall 131.8 -> 56.3 s (prefix reuse: cached_tokens=26624)
+- 128k:  run 0 HIT (fresh, wall 899.6 s: prefill 87 s at ~950 tps,
+         then ~780 s LSA index rebuild + SSD block writes at 128k -
+         rebuild cost is now the dominant prefill-side term);
+         run 1 (repeat) aborted at 172 s: #1473 sustained-soft eviction
+         (usage 103.2 GB during prefix-restore + index rebuild on a hot
+         machine). Same failure signature as the 1M run: deep transient
+         spikes caught by 1 s-poll enforcer, not real exhaustion
+         (post-eviction current 65.8 GB).
+- Completed-request accuracy: 5/5 HIT. 1M deferred (ledgered P3 #5).
+
+Issues filed:
+- fusion-mlx #1513: LSA serving feature umbrella (branch changelog
+  anchor; CHANGELOG entry to reference it at merge).
+- Neywa-Labs/mlx-vlm #2686 (repo moved from Blaizzy): TurboQuant fused
+  single-token KV quantize kernel corrupts power-of-two head dims -
+  repro shows rel_err 1.54/1.46 (hd=128/256) via single-token appends
+  vs 0.076/0.096 via multi-token; workaround = dense-codec guard
+  (turboquant_fused_rht_guard.py, #1230).
+
+Next: README/README_CN/CHANGELOG, then same-machine A/B perf run
+(fresh boot, cool machine, LSA+TQ vs full-attention control).
+
+Task P4: docs landed (commit after 839a86ba, 2026-11-07)
+
+README.md + README_CN.md LSA sections rewritten (stale "quantized KV
+refused at boot" constraint replaced with k8v4 coexistence, packed-rate
+prefill, prefix reuse, budget gate, RULER numbers). CHANGELOG 0.10.52
+entry references #1513 (branch predates the 0.10.51 release commit -
+rebase will need to interleave).
+
+Remaining P4: same-machine A/B perf run (cool machine, fresh boot:
+LSA+TQ vs full-attention control at 32k) - thermal ruling requires a
+cool start and today's machine ran a 9.6 h prefill + RULER suite.
+
+## 2026-11-07 — stale boot log fixed + P4 A/B perf run DONE
+
+- Stale boot log line fixed (TDD): post-load TQ block hardcoded
+  `tq_explicit = False` (batched.py:585), so explicit `--kv-cache-turboquant
+  k8v4` boots logged "TurboQuant KV cache auto-enabled (4-bit)". Extracted
+  `BatchedEngine._turboquant_auto_note()` (True only when `_turboquant_explicit()`
+  is None), wired the log gate to it, removed the dead local. Tests:
+  `test_turboquant_auto_note_false_for_explicit_request` +
+  `test_turboquant_auto_note_true_without_explicit_choice` (RED: AttributeError,
+  GREEN). test_qwen35_lsa_cli.py 14/14. Verified live: fresh k8v4 boot logs
+  k8v4 coexistence lines, NO auto-enabled line.
+- Ledgered "stale test test_settings_conflict_with_turboquant" does not exist
+  in the repo (grep across tests/ = 0 hits) — phantom from a summary; nothing
+  to fix. test_qwen35_lsa_patch.py passes 7/7.
+- P4 A/B perf run (same session, cool machine, fresh boot each arm,
+  RULER 32k needle-depth 1.0, 3 repeats):
+  - LSA + k8v4 TQ: 3/3 HIT, steady-state decode_tps 1.4-1.7 (mean 1.50),
+    wall 61-63 s (run0 111.6 s incl. warmup/index build)
+  - Control (full attention, bf16 KV, no LSA/TQ): 3/3 HIT, decode_tps
+    6.4-7.5 (mean 6.82), wall 8.5-9.9 s (run0 79.1 s warmup)
+  - Ratio: control ~4.6x faster decode at 32k. Consistent with pre-fix
+    1.9 tps LSA baseline (ledger line ~351) and the 8.3 tps external
+    full-attention reference. Control ran second (slightly warmer) yet
+    still 4.6x faster - direction robust to thermal bias.
+  - Conclusion: sparse decode trades ~4.6x decode throughput at 32k for
+    the packed KV footprint; payoff is prefill memory at 128k+ where fp16
+    KV cannot fit. Recorded in README.md + README_CN.md LSA sections.
+  - Bench logs kept: /tmp/lsa_ab/bench_{lsa,ctrl}.log (final outputs).
+- Deferred minors remain ledgered: M1 partial_rotary_factor, M2 --enable-lsa
+  no-op on VLM load paths, M3 _state_cache pinning, I2 rebuild churn, LSA
+  index rebuild cost at 128k.
+- P4 remaining: none in this pass except P3 #5 final 4% (deferred, needs
+  instrumented rerun) and branch rename decision (user).
+
+- Correction (same day): a parallel session committed the identical fix at
+  10:31 (94183092, incl. the same two auto_note tests verbatim taken from
+  the shared worktree) while this session was mid-edit; this session's
+  batched.py edit was superseded by their checkout and commit 17e7aa6b
+  landed as README A/B numbers + black formatting only. Final state: one
+  fix, one test set, tree clean, test_qwen35_lsa_cli.py 14/14. Also:
+  branch was renamed externally fix/mac-app-compile-pbxproj ->
+  feat/lsa-k8v4-serving (the pending rename decision - resolved).
+  "test_settings_conflict_with_turboquant" confirmed phantom (0 grep hits).
