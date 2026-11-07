@@ -38,7 +38,9 @@ QUESTION_TEMPLATE = (
 )
 
 
-def build_prompt(target_tokens: int, seed: int) -> tuple[str, str]:
+def build_prompt(
+    target_tokens: int, seed: int, needle_depth: float = 0.6
+) -> tuple[str, str]:
     rng = random.Random(seed)
     key_word = f"grasveld-{rng.randint(1000, 9999)}"
     value = f"{rng.randint(100000, 999999)}-{rng.randint(100, 999)}"
@@ -46,8 +48,9 @@ def build_prompt(target_tokens: int, seed: int) -> tuple[str, str]:
     filler_words = HAYSTACK_WORDS.split()
     words = []
     needle_words = needle.split()
-    # ~1.3 tokens per English word; inject the needle about 60% deep
-    needle_at = int(target_tokens / 1.3 * 0.6)
+    # ~1.3 tokens per English word; inject the needle at needle_depth
+    # of the context (1.0 = end of context, right before the question)
+    needle_at = min(int(target_tokens / 1.3 * needle_depth), target_tokens // 1.3 - 8)
     while len(words) < target_tokens // 1.3:
         if abs(len(words) - needle_at) < len(needle_words) // 2:
             words.extend(needle_words)
@@ -120,12 +123,20 @@ def main() -> None:
     parser.add_argument("--max-tokens", type=int, default=32)
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--needle-depth",
+        type=float,
+        default=0.6,
+        help="needle position as fraction of context depth (1.0 = end)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     hits = 0
     tps_readings = []
-    prompt, expected = build_prompt(args.length, seed=args.seed)
+    prompt, expected = build_prompt(
+        args.length, seed=args.seed, needle_depth=args.needle_depth
+    )
     logger.info("prompt ~%d tokens, expected value %s", args.length, expected)
     probe_lo = -1
     if os.environ.get("RULER_PROBE_TOKENS"):
