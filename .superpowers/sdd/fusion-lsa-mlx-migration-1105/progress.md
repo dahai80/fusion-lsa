@@ -582,3 +582,20 @@ cool start and today's machine ran a 9.6 h prefill + RULER suite.
   branch was renamed externally fix/mac-app-compile-pbxproj ->
   feat/lsa-k8v4-serving (the pending rename decision - resolved).
   "test_settings_conflict_with_turboquant" confirmed phantom (0 grep hits).
+
+## 2026-11-07 16:45 — upstream PR: Prefrontal-AI/latent-sparse-attention#12
+
+- Fork dahai80/latent-sparse-attention; branch latent-sparse-attent-mlx
+  (user-named, maintained going forward as the MLX port line).
+- PR content: mlx/ directory = selection-logic port (core/quant/index/
+  budget/evaluation) + 42 tests (torch reference as parity oracle, 42/42
+  standalone pass) + p0-report/bench docs + mlx/README.md. 26 files,
+  1628 insertions, commit d4dc413. NO Claude attribution in commit/PR
+  (explicit user instruction for this upstream).
+- Serving-engine integration intentionally out of scope (stays in
+  fusion-mlx); convert module excluded (torch checkpoint parsing,
+  Fusion-side).
+- PR: https://github.com/Prefrontal-AI/latent-sparse-attention/pull/12
+- Promotion deck v2 rebuilt same day (charts + 4-step LSA principle
+  walkthrough, Huawei style) - docs/latent-spars-attention-mlx.{md,pptx},
+  commits a842c97/af1c0a6.
