@@ -620,3 +620,11 @@ cool start and today's machine ran a 9.6 h prefill + RULER suite.
 - Enforcer facts measured: soft=102.0 / hard=114 / ceiling=120 GB. Soft crossed 07:13-07:14; busy-evict blocked (active request) + EVICT_POLLS=120 patience -> no relief before watchdog died.
 - Root causes to fix for v4: (1) enforcer ceiling too high for 128 GB unified memory — needs ~20 GB OS headroom (ceiling ~106/soft ~96/hard ~102); (2) no escalation when sustained soft AND climbing — EVICT_POLLS patience protects transients but is deadly at true saturation.
 - Doc pitfall added: machine-level swap storm. Panics: panic-full-2026-11-08-071736.0002.panic (today), none found for Nov 7 17:28 reboot (cause unconfirmed for that one).
+
+## 2026-11-08 09:50 — v4 attempt killed by SoC thermal reset (sochot), not memory
+- Machine reset 09:40:39, Boot faults "sochot,reset_in_3 timeout" — hardware SoC-hot reset, NO panic file. Run died at 75,776/1,095,638 with phys 60.8 GB (no memory pressure at all).
+- Rate collapse before death: 208 tok/s (08:41) -> 23 tok/s (08:59, at only 75k ctx where ~600 expected) -> 40 min log stall -> sochot. Progressive thermal throttle then hardware reset.
+- Likely same cause as Nov 7 17:28 reboot (v3 attempt 1) — no panic file for that one either.
+- 3 machine deaths in 2 days, all during 1M full-load runs (1 swap-storm panic + 2 sochot). Machine cannot sustain the 13 h full-Metal prefill in current thermal state.
+- v4 run also fixed two launch bugs en route: missing --text-only routed load to the VLM engine path and LSA never armed (armed lines + 400 preflight rejection); 11434 default server held 23 GB resident. Restarted with --text-only, k8v4 confirmed, watchdog armed.
+- Decision (user): pause 1M rerun, start sparse-prefill design round. Algorithm evidence already sufficient (986k passed, transient fix verified, clean curve). 1M rerun deferred until machine cooled / off-peak.
