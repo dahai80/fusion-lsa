@@ -65,6 +65,10 @@ def ward_rounds(
         absorbed = best[block_ids, kept]
         updates = key_sums[block_ids, absorbed]
         for i in range(count):
+            if i and i % 64 == 0:
+                # Bound the lazy chain: large merge rounds queue thousands of
+                # nodes; an eval flush keeps the pending-buffer count sane.
+                mx.eval(key_sums, bucket_sizes, alive, parent)
             row_hit = block_ids[i : i + 1] == rows
             kept_hit = row_hit & (cols == kept[i])
             abs_hit = row_hit & (cols == absorbed[i])
