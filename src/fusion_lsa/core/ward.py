@@ -63,20 +63,55 @@ def ward_rounds(
         block_ids = flat_idx // pools
         kept = flat_idx % pools
         absorbed = best[block_ids, kept]
-        updates = key_sums[block_ids, absorbed]
-        for i in range(count):
-            if i and i % 64 == 0:
-                # Bound the lazy chain: large merge rounds queue thousands of
-                # nodes; an eval flush keeps the pending-buffer count sane.
-                mx.eval(key_sums, bucket_sizes, alive, parent)
-            row_hit = block_ids[i : i + 1] == rows
-            kept_hit = row_hit & (cols == kept[i])
-            abs_hit = row_hit & (cols == absorbed[i])
-            key_sums = key_sums + kept_hit[:, :, None] * updates[i][None, None, :]
-            bucket_sizes = bucket_sizes + mx.where(kept_hit, bucket_sizes[block_ids[i], absorbed[i]], 0.0)
-            alive = alive & ~abs_hit
-            parent = mx.where(abs_hit, mx.full(parent.shape, int(kept[i]), dtype=parent.dtype), parent)
+        # Mutual pairs are disjoint by construction (best[j] is unique, so a
+        # pool can be kept by at most one partner and absorbed at most once),
+        # so the whole round applies as one vectorized pass instead of a
+        # per-pair Python loop. The loop version queued thousands of lazy
+        # intermediates and hit the Metal live-buffer resource limit
+        # (499000) on the 1M decode-start ward merge.
+        # kept-side grid: recv[b, kept] = absorbed (kept slots receive the
+        # absorbed pool's keys); absorbed-side grid: gone[b, absorbed] = kept
+        # (absorbed slots die and point at their keeper).
+        recv = mx.full((blocks, pools), -1, dtype=mx.int32)
+        recv = mx.reshape(
+            mx.put_along_axis(
+                mx.reshape(recv, (-1,)),
+                block_ids * pools + kept,
+                absorbed.astype(mx.int32),
+                axis=0,
+            ),
+            (blocks, pools),
+        )
+        has_recv = recv >= 0
+        safe_r = mx.maximum(recv, 0)
+        key_sums = key_sums + mx.where(
+            has_recv[:, :, None],
+            mx.take_along_axis(key_sums, safe_r[:, :, None], axis=1),
+            0.0,
+        )
+        bucket_sizes = bucket_sizes + mx.where(
+            has_recv,
+            mx.take_along_axis(bucket_sizes, safe_r, axis=1),
+            0.0,
+        )
+        gone = mx.full((blocks, pools), -1, dtype=mx.int32)
+        gone = mx.reshape(
+            mx.put_along_axis(
+                mx.reshape(gone, (-1,)),
+                block_ids * pools + absorbed,
+                kept.astype(mx.int32),
+                axis=0,
+            ),
+            (blocks, pools),
+        )
+        is_gone = gone >= 0
+        alive = alive & ~is_gone
+        parent = mx.where(is_gone, gone, parent)
         merges_done += count
+        # Bound the lazy chain: each round queues a bounded set of
+        # intermediates; a per-round eval flush keeps the pending-buffer
+        # count flat over the 256-round budget.
+        mx.eval(key_sums, bucket_sizes, alive, parent)
     for _ in range(math.ceil(math.log2(max(pools, 2))) + 1):
         parent = mx.take_along_axis(parent, parent, axis=1)
     number = mx.cumsum(alive.astype(mx.int32), axis=1) - 1
