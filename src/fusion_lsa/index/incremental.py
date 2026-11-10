@@ -33,6 +33,13 @@ class IncrementalBucketIndex:
             raise ValueError(
                 f"append takes exactly one page of {self.cluster_block_size} keys - got shape {keys.shape}"
             )
+        # The Metal buffer quota is process-wide and the allocator cache counts
+        # toward it. Long decode steps churn small buffers into the pool until
+        # an unrelated allocation (the ward merge here) trips the 499000 limit.
+        # Page closes are infrequent (one per cluster_block_size tokens), so
+        # trimming the cache here is cheap insurance. 1M run v7 died exactly
+        # this way after 12 quiet minutes of decode.
+        mx.metal.clear_cache()
         block = build_buckets(keys, self.pool_size, self.bucket_size, self.bucket_cap, self.cluster_block_size)
         # build_buckets over one page numbers keys locally; shift them to positions in the whole sequence
         offset = len(self._blocks) * self.cluster_block_size
