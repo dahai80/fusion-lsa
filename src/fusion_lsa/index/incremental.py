@@ -8,6 +8,33 @@ from fusion_lsa.core.reference import Buckets, build_buckets
 logger = logging.getLogger(__name__)
 
 
+def _memory_snapshot() -> str:
+    # One-line allocator + process state for the 1M decode-time page-close
+    # postmortem (metal::malloc Resource limit 499000 at this exact site,
+    # runs v5 2026-11-12 and v7 2026-11-15). Logged per page close; pages
+    # are infrequent so the cost is noise.
+    import os
+    import subprocess
+
+    try:
+        rss = int(
+            subprocess.run(
+                ["ps", "-o", "rss=", "-p", str(os.getpid())],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            ).stdout.strip()
+        ) * 1024
+    except Exception:
+        rss = 0
+    return (
+        f"active={mx.get_active_memory() / 2**30:.2f}GB "
+        f"cache={mx.get_cache_memory() / 2**30:.2f}GB "
+        f"peak={mx.get_peak_memory() / 2**30:.2f}GB "
+        f"rss={rss / 2**30:.2f}GB"
+    )
+
+
 @dataclass
 class IncrementalBucketIndex:
     # Page-boundary contract: buckets are built only over whole cluster blocks, one page of
@@ -37,10 +64,33 @@ class IncrementalBucketIndex:
         # toward it. Long decode steps churn small buffers into the pool until
         # an unrelated allocation (the ward merge here) trips the 499000 limit.
         # Page closes are infrequent (one per cluster_block_size tokens), so
-        # trimming the cache here is cheap insurance. 1M run v7 died exactly
-        # this way after 12 quiet minutes of decode.
+        # trimming the cache here is cheap insurance. 1M runs v5/v7 died at a
+        # decode-time page close inside build_buckets.
         mx.metal.clear_cache()
-        block = build_buckets(keys, self.pool_size, self.bucket_size, self.bucket_cap, self.cluster_block_size)
+        try:
+            block = build_buckets(keys, self.pool_size, self.bucket_size, self.bucket_cap, self.cluster_block_size)
+        except RuntimeError as exc:
+            # 1M decode-time page close hit metal::malloc Resource limit
+            # (499000) in v5/v7. Log the allocator state, flush everything
+            # pending, clear the cache once and retry before giving up - if
+            # the denial is a transient pressure spike this rides over it,
+            # otherwise the retry fails with the telemetry line right above.
+            logger.error(
+                "incremental index: page close failed, %s; snapshot %s",
+                exc,
+                _memory_snapshot(),
+            )
+            mx.synchronize(mx.default_stream(mx.default_device()))
+            mx.metal.clear_cache()
+            block = build_buckets(keys, self.pool_size, self.bucket_size, self.bucket_cap, self.cluster_block_size)
+            logger.info("incremental index: page close retry succeeded, snapshot %s", _memory_snapshot())
+        logger.info(
+            "incremental index: block %d appended, %d blocks, %d keys, %s",
+            len(self._blocks),
+            len(self._blocks) + 1,
+            self._key_count + self.cluster_block_size,
+            _memory_snapshot(),
+        )
         # build_buckets over one page numbers keys locally; shift them to positions in the whole sequence
         offset = len(self._blocks) * self.cluster_block_size
         members = block.bucket_members
