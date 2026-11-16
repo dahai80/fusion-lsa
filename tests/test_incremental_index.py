@@ -34,6 +34,18 @@ def test_incremental_matches_batched():
     assert np.array_equal(np.array(incremental.bucket_sizes), np.array(batched.bucket_sizes))
 
 
+def test_append_runs_without_metal_module(monkeypatch):
+    # CI runs on ubuntu: mlx ships Linux CPU wheels with no mx.metal
+    # submodule. The page-close path must degrade to a no-op cache trim
+    # there instead of raising AttributeError.
+    import fusion_lsa.index.incremental as inc
+
+    monkeypatch.delattr(inc.mx, "metal", raising=False)
+    index = IncrementalBucketIndex(pool_size=4, bucket_size=8, bucket_cap=16, cluster_block_size=BLOCK)
+    index.append(_keys(BLOCK))
+    assert index._key_count == BLOCK
+
+
 def test_append_wards_on_cpu_stream(monkeypatch):
     # The 1M runs (v5/v7/v8) all died in this exact call when it ran on the
     # Metal device: the ward merge's allocations were denied by the
