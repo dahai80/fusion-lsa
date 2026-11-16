@@ -582,3 +582,49 @@ cool start and today's machine ran a 9.6 h prefill + RULER suite.
   branch was renamed externally fix/mac-app-compile-pbxproj ->
   feat/lsa-k8v4-serving (the pending rename decision - resolved).
   "test_settings_conflict_with_turboquant" confirmed phantom (0 grep hits).
+
+## 2026-11-07 16:45 — upstream PR: Prefrontal-AI/latent-sparse-attention#12
+
+- Fork dahai80/latent-sparse-attention; branch latent-sparse-attent-mlx
+  (user-named, maintained going forward as the MLX port line).
+- PR content: mlx/ directory = selection-logic port (core/quant/index/
+  budget/evaluation) + 42 tests (torch reference as parity oracle, 42/42
+  standalone pass) + p0-report/bench docs + mlx/README.md. 26 files,
+  1628 insertions, commit d4dc413. NO Claude attribution in commit/PR
+  (explicit user instruction for this upstream).
+- Serving-engine integration intentionally out of scope (stays in
+  fusion-mlx); convert module excluded (torch checkpoint parsing,
+  Fusion-side).
+- PR: https://github.com/Prefrontal-AI/latent-sparse-attention/pull/12
+- Promotion deck v2 rebuilt same day (charts + 4-step LSA principle
+  walkthrough, Huawei style) - docs/latent-spars-attention-mlx.{md,pptx},
+  commits a842c97/af1c0a6.
+
+## 2026-11-07 19:35 — machine reboot killed v3 run; v3 restarted with durable logs
+
+- Machine rebooted ~17:28 (2 min after the last recorded memcheck at
+  643k/1095k); server process died, /tmp/lsa_ab/ wiped — serve log, bench
+  log, and everything past 643k lost. No final data for v3 attempt 1.
+- Losses are procedural, not scientific: mitigations were already
+  verified live before the crash (key chunk 8192, peak-active gap ~4.6 GB
+  vs ~28 GB in v2, zero enforcer events through 643k).
+- Hardening: long-run logs moved to ~/.fusion-mlx/logs/lsa-1m-v3-*.log
+  (durable; /tmp wiped on reboot). Memory note saved.
+- v3 attempt 2 launched 19:33: server PID 96296, bench PID 97495,
+  prompt ~1.315M words -> ~1.01M tokens, FUSION_MLX_SOFT_BUSY_EVICT_POLLS=120,
+  key chunk 8192. Same instrumentation. ETA ~10 h (~05:30 next morning).
+
+## 2026-11-08 07:40 — v3 attempt 2 outcome: machine panic at 999k (91.2%), 986k PASSED
+- v3 crossed v2 death point 986k cleanly (reached 999,424/1,095,638), zero enforcer evictions; chunk-8192 transient fix VERIFIED (peak-active ~4.5 GB steady vs ~28 GB v2).
+- Machine kernel panic 07:17:36: watchdogd starved 92 s, 33 swapfiles, stackshot partial — whole-machine memory saturation (run phys 105-106 GB + OS + bench client on 128 GB), not algorithm regression.
+- Enforcer facts measured: soft=102.0 / hard=114 / ceiling=120 GB. Soft crossed 07:13-07:14; busy-evict blocked (active request) + EVICT_POLLS=120 patience -> no relief before watchdog died.
+- Root causes to fix for v4: (1) enforcer ceiling too high for 128 GB unified memory — needs ~20 GB OS headroom (ceiling ~106/soft ~96/hard ~102); (2) no escalation when sustained soft AND climbing — EVICT_POLLS patience protects transients but is deadly at true saturation.
+- Doc pitfall added: machine-level swap storm. Panics: panic-full-2026-11-08-071736.0002.panic (today), none found for Nov 7 17:28 reboot (cause unconfirmed for that one).
+
+## 2026-11-08 09:50 — v4 attempt killed by SoC thermal reset (sochot), not memory
+- Machine reset 09:40:39, Boot faults "sochot,reset_in_3 timeout" — hardware SoC-hot reset, NO panic file. Run died at 75,776/1,095,638 with phys 60.8 GB (no memory pressure at all).
+- Rate collapse before death: 208 tok/s (08:41) -> 23 tok/s (08:59, at only 75k ctx where ~600 expected) -> 40 min log stall -> sochot. Progressive thermal throttle then hardware reset.
+- Likely same cause as Nov 7 17:28 reboot (v3 attempt 1) — no panic file for that one either.
+- 3 machine deaths in 2 days, all during 1M full-load runs (1 swap-storm panic + 2 sochot). Machine cannot sustain the 13 h full-Metal prefill in current thermal state.
+- v4 run also fixed two launch bugs en route: missing --text-only routed load to the VLM engine path and LSA never armed (armed lines + 400 preflight rejection); 11434 default server held 23 GB resident. Restarted with --text-only, k8v4 confirmed, watchdog armed.
+- Decision (user): pause 1M rerun, start sparse-prefill design round. Algorithm evidence already sufficient (986k passed, transient fix verified, clean curve). 1M rerun deferred until machine cooled / off-peak.
