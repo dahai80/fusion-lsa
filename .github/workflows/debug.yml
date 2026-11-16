@@ -1,0 +1,15 @@
+name: DEBUG
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  ubuntu-echo:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "ubuntu alive"
+  macos-echo:
+    runs-on: macos-14
+    steps:
+      - run: echo "macos alive"
