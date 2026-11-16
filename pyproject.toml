@@ -8,7 +8,11 @@ version = "0.1.0"
 description = "Latent Sparse Attention ported to MLX/Metal for the Fusion monorepo"
 requires-python = ">=3.11"
 dependencies = [
-    "mlx>=0.29",
+    # macOS: metal backend ships inside the mlx wheel. Linux: the plain mlx
+    # wheel is a 0-byte stub dispatching to mlx-cuda/mlx-cpu extras - CI runs
+    # the CPU backend on hosted ubuntu.
+    "mlx>=0.29; platform_system == 'Darwin'",
+    "mlx[cpu]>=0.29; platform_system == 'Linux'",
     "numpy",
 ]
 
