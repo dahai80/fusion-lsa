@@ -18,10 +18,50 @@ def _keys(total: int, seed: int = 5) -> mx.array:
 
 
 def test_incremental_matches_batched():
+    # Both sides run on the CPU stream: the ward merge's argmin over fp32
+    # gram similarities is not reproducible ACROSS devices (CPU vs GPU
+    # reduction order flips argmin ties, cascading into different cluster
+    # memberships), so byte-equal parity is only pinned per device.
     keys = _keys(BLOCK * 4)
-    batched = build_buckets(keys, 4, 8, 16, BLOCK)
+    with mx.stream(mx.cpu):
+        batched = build_buckets(keys, 4, 8, 16, BLOCK)
     index = IncrementalBucketIndex(pool_size=4, bucket_size=8, bucket_cap=16, cluster_block_size=BLOCK)
     for block in range(4):
+        index.append(keys[block * BLOCK : (block + 1) * BLOCK])
+    incremental = index.buckets()
+    assert np.array_equal(np.array(incremental.bucket_centroids), np.array(batched.bucket_centroids))
+    assert np.array_equal(np.array(incremental.bucket_members), np.array(batched.bucket_members))
+    assert np.array_equal(np.array(incremental.bucket_sizes), np.array(batched.bucket_sizes))
+
+
+def test_append_wards_on_cpu_stream(monkeypatch):
+    # The 1M runs (v5/v7/v8) all died in this exact call when it ran on the
+    # Metal device: the ward merge's allocations were denied by the
+    # process-wide Metal buffer quota at ~81GB of live buffers. Page closes
+    # are infrequent (one per cluster block), so the merge must run on the
+    # CPU stream; unified memory means the resulting buckets feed GPU decode
+    # kernels without a copy.
+    import fusion_lsa.index.incremental as inc
+
+    streams = []
+    orig_stream = inc.mx.stream
+
+    def spy(device=None):
+        streams.append(device)
+        return orig_stream(device)
+
+    monkeypatch.setattr(inc.mx, "stream", spy)
+    index = IncrementalBucketIndex(pool_size=4, bucket_size=8, bucket_cap=16, cluster_block_size=BLOCK)
+    index.append(_keys(BLOCK))
+    assert mx.cpu in streams
+
+
+def test_append_cpu_stream_matches_batched():
+    keys = _keys(BLOCK * 2)
+    with mx.stream(mx.cpu):
+        batched = build_buckets(keys, 4, 8, 16, BLOCK)
+    index = IncrementalBucketIndex(pool_size=4, bucket_size=8, bucket_cap=16, cluster_block_size=BLOCK)
+    for block in range(2):
         index.append(keys[block * BLOCK : (block + 1) * BLOCK])
     incremental = index.buckets()
     assert np.array_equal(np.array(incremental.bucket_centroids), np.array(batched.bucket_centroids))
