@@ -68,7 +68,14 @@ class IncrementalBucketIndex:
         # decode-time page close inside build_buckets.
         mx.metal.clear_cache()
         try:
-            block = build_buckets(keys, self.pool_size, self.bucket_size, self.bucket_cap, self.cluster_block_size)
+            # v8 (2026-11-17) showed the quota denial reproduces even at
+            # PREFILL-time page closes (98.7% through the 1M prefill) with
+            # ~81GB live buffers and a denied scalar allocation - clear_cache
+            # cannot fix it. The ward merge is small (one cluster block) and
+            # infrequent, so it runs on the CPU stream; unified memory lets
+            # the resulting buckets feed GPU decode kernels without a copy.
+            with mx.stream(mx.cpu):
+                block = build_buckets(keys, self.pool_size, self.bucket_size, self.bucket_cap, self.cluster_block_size)
         except RuntimeError as exc:
             # 1M decode-time page close hit metal::malloc Resource limit
             # (499000) in v5/v7. Log the allocator state, flush everything
