@@ -99,6 +99,59 @@ def test_partial_tail_never_bucketed():
         index.append(keys[3 * BLOCK :])
 
 
+def test_append_stores_blocks_on_host():
+    # The 1M decode-entry rebuild (v8 2026-11-17, v9r2 2026-11-17) died at the
+    # process-wide 499000 MTLResource cap: every closed page stored its lazy
+    # Buckets arrays un-evaluated, pinning ~203 MTL intermediate buffers per
+    # close (measured with an in-process MetalAllocator counter probe). The
+    # intermediates are invisible to gc (python only holds the three output
+    # arrays), untracked by mx.get_active_memory for the CPU-stream path, and
+    # unreachable by mx.clear_cache (live graph nodes, not cache), so the
+    # counter climbed ~200 per close for 2100+ closes until metal::malloc was
+    # denied. Even with mx.eval on store, the three retained arrays cost 3
+    # MTL buffers per close - 410k resources across a full 64-layer rebuild
+    # (136,896 closes), 82% of the cap. Blocks are therefore stored as numpy
+    # on the host: zero MTL resources per close, and buckets() materializes
+    # one evaluated concatenation per field on demand.
+    index = IncrementalBucketIndex(pool_size=4, bucket_size=8, bucket_cap=16, cluster_block_size=BLOCK)
+    index.append(_keys(BLOCK))
+    block = index._blocks[-1]
+    for stored in (block.bucket_centroids, block.bucket_members, block.bucket_sizes):
+        assert isinstance(stored, np.ndarray), "append stored an MTL-resident block array"
+    assert block.bucket_members.dtype == np.int32
+    assert block.bucket_centroids.dtype == np.float32
+    assert int(block.bucket_members.max()) == BLOCK - 1
+    assert int(block.bucket_sizes.sum()) == BLOCK
+
+
+def test_append_block_storage_does_not_pin_mtl_buffers():
+    # mlx's numpy conversion is zero-copy on unified memory: a numpy array
+    # taken straight from an mx.array keeps the MTL buffer alive through the
+    # view (base is the mx buffer). Host storage must detach - a pinned
+    # buffer per field per close still walks a 64-layer rebuild (136,896
+    # closes) into the 499000 MTLResource cap.
+    index = IncrementalBucketIndex(pool_size=4, bucket_size=8, bucket_cap=16, cluster_block_size=BLOCK)
+    index.append(_keys(BLOCK))
+    block = index._blocks[-1]
+    for stored in (block.bucket_centroids, block.bucket_members, block.bucket_sizes):
+        assert stored.base is None, "append stored a numpy view pinning an MTL buffer"
+
+
+def test_buckets_concat_from_host_blocks():
+    # buckets() rebuilds its evaluated mx.array concatenation from the
+    # host-resident blocks; values must match a straight build_buckets run.
+    keys = _keys(BLOCK * 2)
+    with mx.stream(mx.cpu):
+        batched = build_buckets(keys, 4, 8, 16, BLOCK)
+    index = IncrementalBucketIndex(pool_size=4, bucket_size=8, bucket_cap=16, cluster_block_size=BLOCK)
+    for block in range(2):
+        index.append(keys[block * BLOCK : (block + 1) * BLOCK])
+    incremental = index.buckets()
+    assert np.array_equal(np.array(incremental.bucket_centroids), np.array(batched.bucket_centroids))
+    assert np.array_equal(np.array(incremental.bucket_members), np.array(batched.bucket_members))
+    assert np.array_equal(np.array(incremental.bucket_sizes), np.array(batched.bucket_sizes))
+
+
 def test_closed_blocks_stay_unchanged():
     index = IncrementalBucketIndex(pool_size=4, bucket_size=8, bucket_cap=16, cluster_block_size=BLOCK)
     index.append(_keys(BLOCK, seed=7))

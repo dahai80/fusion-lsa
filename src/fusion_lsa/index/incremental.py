@@ -2,6 +2,7 @@ import logging
 from dataclasses import dataclass, field
 
 import mlx.core as mx
+import numpy as np
 
 from fusion_lsa.core.reference import Buckets, build_buckets
 
@@ -102,11 +103,30 @@ class IncrementalBucketIndex:
             self._key_count + self.cluster_block_size,
             _memory_snapshot(),
         )
+        # The block is stored for the life of the request: a lazy array pins
+        # its whole materialized upstream graph (build_buckets intermediates),
+        # ~203 MTL buffers per page close - invisible to gc, untracked by
+        # active-memory accounting on the CPU-stream path, and unreachable by
+        # clear_cache (live graph nodes, not cache). The 1M decode-entry
+        # rebuilds (v8/v9r2) died at the process-wide 499000 MTLResource cap
+        # after 2100+ closes this way. Even evaluated mx.arrays would retain 3
+        # buffers per close (410k over a full 64-layer rebuild), so blocks are
+        # copied to host numpy instead: zero MTL resources per close, and
+        # buckets() materializes one evaluated concatenation per field.
+        mx.eval(block.bucket_centroids, block.bucket_members, block.bucket_sizes)
+        # np.asarray on an mx.array is a zero-copy VIEW that pins the MTL
+        # buffer through numpy's base reference - one buffer per field per
+        # close still walks a 64-layer rebuild into the 499000 cap. The
+        # second np.array(copy=True) produces an owned host copy and lets
+        # the view (and its buffer) die at scope exit.
+        centroids = np.array(np.asarray(block.bucket_centroids), copy=True)
         # build_buckets over one page numbers keys locally; shift them to positions in the whole sequence
         offset = len(self._blocks) * self.cluster_block_size
-        members = block.bucket_members
-        block = block._replace(
-            bucket_members=mx.where(members >= 0, members + offset, members).astype(mx.int32)
+        members = np.array(np.asarray(block.bucket_members), copy=True)
+        members = np.where(members >= 0, members + offset, members).astype(np.int32)
+        sizes = np.array(np.asarray(block.bucket_sizes), copy=True)
+        block = Buckets(
+            centroids, members, sizes, block.block_bucket_count, block.cluster_block_size
         )
         self._blocks.append(block)
         self._key_count += self.cluster_block_size
@@ -132,10 +152,14 @@ class IncrementalBucketIndex:
         if not self._blocks:
             raise ValueError("the index holds no closed blocks")
         if self._cached_buckets is None:
+            # Host-side numpy concat, one mx.array materialization per field:
+            # concatenating mx.arrays here would pin every block's buffer in
+            # the lazy result graph (the same retention class that killed the
+            # 1M rebuilds at the 499000 MTLResource cap).
             self._cached_buckets = Buckets(
-                mx.concatenate([block.bucket_centroids for block in self._blocks], axis=0),
-                mx.concatenate([block.bucket_members for block in self._blocks], axis=0),
-                mx.concatenate([block.bucket_sizes for block in self._blocks], axis=0),
+                mx.array(np.concatenate([block.bucket_centroids for block in self._blocks])),
+                mx.array(np.concatenate([block.bucket_members for block in self._blocks])),
+                mx.array(np.concatenate([block.bucket_sizes for block in self._blocks])),
                 self._blocks[0].block_bucket_count,
                 self.cluster_block_size,
             )
