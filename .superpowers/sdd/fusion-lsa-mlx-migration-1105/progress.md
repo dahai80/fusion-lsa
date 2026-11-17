@@ -892,3 +892,4 @@ cool start and today's machine ran a 9.6 h prefill + RULER suite.
 - Plan B (v9r2 fails same site): full forensics -> new hypothesis -> auto-relaunch v10 (no user wait); open item stays open; ICML-with-open-item ruling unchanged.
 - Quest baseline: on hold (950DT occupied by other team, user confirmed). Not a blocker for paper route per user ruling.
 - Do NOT touch: hsa LaTeX/venue/refs (parallel session owns).
+- User pre-approved 19:33: "如果需要v10，一定要跑，不要等我决策" - Plan B auto-relaunch is now explicit standing authorization, not a default.
