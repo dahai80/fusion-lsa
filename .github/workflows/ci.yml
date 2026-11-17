@@ -21,8 +21,12 @@ concurrency:
 
 jobs:
   test:
-    # mlx requires macOS (Apple Silicon); ubuntu runners cannot install it.
-    runs-on: macos-14
+    # ubuntu + mlx Linux CPU wheel. Hosted macOS runners were auto-cancelled
+    # at queue time on this account (5 consecutive runs, 0 steps executed,
+    # bisected with an ubuntu-vs-macos echo pair), so the gate runs where it
+    # actually executes; the ward merge already runs on the CPU stream and
+    # the page-close cache trims degrade to no-ops without mx.metal.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
