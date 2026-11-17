@@ -884,3 +884,11 @@ cool start and today's machine ran a 9.6 h prefill + RULER suite.
 - v9 healthy at 09:20: 253,952/1,095,638 (23%), ~70 tok/s (3.6x v8 - quiet machine, no :11434 resident), ETA decode entry ~13:00 CST. 0 incremental logs during prefill = expected (index not built during prefill). Note: FUSION_MLX_METAL_CACHE_LIMIT knob never fires (log line absent v8+v9; enforcer overrides to 64GB via working-set fraction) - not blocking, v8 prefill survived same config.
 - 12:44 machine reboot killed v9 at 48% (526,336 tok, clean logs, no code failure). v9r2 relaunched 13:16; bench twice died Errno 61 while server healthy -> root cause: httpx trust_env honors macOS SYSTEM proxy (scutil 127.0.0.1:7897) via urllib _scproxy; Clash not running post-reboot -> refused. trust_env=False works. Fix: no_proxy=127.0.0.1,localhost exported in relaunch_1m.sh (hsa 840cea4) + bench relaunched with it 13:23 (HTTP 200, bench 63082, watchdog 65040). Pitfall-38 variant: system-config proxy, not env var.
 - Note: a parallel session committed hsa 95a49a7 (v9 kill/relaunch + ICML 2027 venue dates) while this session debugged - no content conflict.
+
+## 2026-11-17 19:31 (user away - autonomous overnight plan)
+- Standing grant reaffirmed: finish all todos, no waiting. Decisions surfaced with defaults (user did not object before leaving).
+- v9r2: 56% at 19:05, prefill ETA ~00:30-02:00, decode-entry rebuild = ruling point for draft S5.2 item 3.
+- Plan A (v9r2 decode passes): update run-logs v9r2 row + draft S5.2 (close item 3, wording "verified by run v9r2") + S5.3; record bench hit/miss + decode tps; then after machine cools ~30min run 128K RULER sweep (remaining checklist item, Mac single-big-job discipline).
+- Plan B (v9r2 fails same site): full forensics -> new hypothesis -> auto-relaunch v10 (no user wait); open item stays open; ICML-with-open-item ruling unchanged.
+- Quest baseline: on hold (950DT occupied by other team, user confirmed). Not a blocker for paper route per user ruling.
+- Do NOT touch: hsa LaTeX/venue/refs (parallel session owns).
