@@ -628,3 +628,255 @@ cool start and today's machine ran a 9.6 h prefill + RULER suite.
 - 3 machine deaths in 2 days, all during 1M full-load runs (1 swap-storm panic + 2 sochot). Machine cannot sustain the 13 h full-Metal prefill in current thermal state.
 - v4 run also fixed two launch bugs en route: missing --text-only routed load to the VLM engine path and LSA never armed (armed lines + 400 preflight rejection); 11434 default server held 23 GB resident. Restarted with --text-only, k8v4 confirmed, watchdog armed.
 - Decision (user): pause 1M rerun, start sparse-prefill design round. Algorithm evidence already sufficient (986k passed, transient fix verified, clean curve). 1M rerun deferred until machine cooled / off-peak.
+
+## 2026-11-08 11:10 — HSA M0 spike: Tasks 1-2 complete, Task 3 partial (dense floors 4k PASS), Task 6 script ready
+
+- hsa repo (/Users/dahai/fusion/hsa) scaffold + prefill-curve + ruler-floor code committed (9fa1a66, 57949d0, Task-3 commit, ca9952f).
+- Dense 4k baseline RUN: 9/9 HIT, all three needle categories 1.0 >= 0.99 floor PASS (results/dense_ruler_4096.json).
+- Launch bugs fixed en route: (1) lsa worktree vanished again -> recreated from origin/feat/lsa-k8v4-serving (bdde1844); (2) resolve_model rejected model path — model is symlink into fusion-lsa/models, allowed-dirs check needs cwd=fusion-lsa (same as v3/v4); (3) 600s boot budget (240s was too short, server takes ~300s to bind); (4) orphaned fusion-mlx-server held 11556 -> killed.
+- relaunch_1m.sh written + bash -n OK, flags verified against worktree (--text-only --enable-lsa --lsa-map .../qwen38_27b__long-16k-1M-heavy-key-and-query-d2048.pt --kv-cache-turboquant k8v4 --no-memory-aware-cache --spec-decode none, FUSION_MLX_SOFT_BUSY_EVICT_POLLS=100000, LSA-arm boot check, watchdog). NOT EXECUTED — operator launches this afternoon.
+- 950DT probe blocked so far: jump host 139.9.159.231 intermittently denies keyboard-interactive auth (1 success at 10:53, then "Too many authentication failures" — likely fail2ban from earlier failed attempts); retry loop running at 5-min intervals. Probe scripts ready (npu_train_probe.py, probe_950dt.sh).
+- Ruling: 128k dense baseline repeats may be cut from 3 to 1 depending on machine heat after 32k x3 — 2.5h dense prefill right before the operator's 14h 1M window recreates the sochot preheat risk; single-repeat needle scores at temp 0 are near-deterministic, floor evaluation unaffected. Cost if wrong: slightly wider CI on the dense 128k baseline number.
+
+## 2026-11-08 12:00 — M0: 32k dense floor PASS; 128k dense rep0 done (depth-1.0 MISS); 950DT probe GO; bench-crash hardening
+
+- Dense 32k: 9/9 HIT, all categories 1.0 -> floor PASS (results/dense_ruler_32768.json). 12 min total (~80s/req).
+- Dense 128k rep0 (seed 42): depth 0.25 HIT (wall 350s), depth 0.50 HIT (845s), depth 1.0 MISS (863s). Dense baseline itself fails end-of-context needle at 128k (temp 0, int4 KV default) — HSA comparison is ratio-to-dense, this IS the dense reference; do not "fix" dense.
+- Bench crashed on 503 (server evicted+reloading model between requests). Hardened runner: 3-attempt retry w/ backoff on 5xx, miss fallback. Repeat in flight (seed 43, 3 requests ~35 min) — ruling: 2 data points per category accepted for dense 128k baseline (thermal: stop GPU load before operator's afternoon 1M window). Cost if wrong: wider CI on dense mean.
+- 950DT training probe EXECUTED: GO. Ascend950DT_9582, torch_npu 2.10.0, 4-layer Qwen3.8 full-layer-shape block seq 4096 bf16 AdamW: loss 1.0473->1.0384 (5/5 decreasing), steady 0.085 s/step, 7.47 GB per 4 layers (~30 GB extrapolated for 16 full-attn layers). Container epic_northcutt. Jump-host auth: fail2ban-like; single-prompt combo + -L tunnel works, ProxyCommand does NOT (sshpass TTY). docs/m0-95...
+
+## 2026-11-08 12:30 — M0 COMPLETE (except deferred items)
+
+- LoRA smoke: VIABLE. mlx_lm.lora 20/20 iters on Qwen3.8-27B 4-bit base, train loss 2.589->1.844, val 4.566->1.765, peak 74.8 GB, ~0.09 it/s steady. Solo-only (kill resident servers first). docs/m0-lora-smoke.md.
+- M0 report written: hsa/docs/m0-report.md. Commits: ca9952f, b52453e, 8978482. Tests 8/8.
+- Deferred: dense 128k seed-43 repeat (bg task killed by session memory-pressure reap; harness rule = no restart without operator ask); dense curve 256k/512k (behind 1M window).
+- 1M relaunch: scripts/relaunch_1m.sh ready, bash -n OK, NOT executed. Operator launches this afternoon; script does not check thermal precondition.
+- Next: M1 kernels + parity per plan.
+
+## M1 three-tier attention — hsa repo (2026-11-08)
+
+- SWA / landmark / latent / prune tiers implemented + parity-gated (MLX CPU device; Metal fp32 matmul err ~6e-4 unacceptable for parity).
+- Streaming tier committed ac591f4. 19/19 tests green.
+- Ruling: MLX matmul `(1,h,d) @ (h,d,k)` leading-1 broadcast silently duplicates heads (head0==head1, head2==head3) — root cause of streaming mismatch. Correct pattern: matched batch dims `(h,keys,d) @ (h,d,1) -> (h,keys)`. Batch tier unaffected (uses matched dims). Cost if wrong: silent wrong attention under GQA.
+- Ruling: latent tier uses per-block MEAN keys projected to d_latent + block-mean values (v1 per-token latents were degenerate = full attention).
+- Deferred to M2: learned projections replace truncation/pad latent projection.
+- Dense 128k seed-43 repeat: all 1.0 PASS — rep0 depth-1.0 miss is seed flake under int4 KV, not systematic. m0-report updated.
+- 1M rerun: relaunch script ready, HELD for explicit user command per directive.
+
+## M1 complete — hsa commits ac591f4 + 3490497 (2026-11-08)
+
+- Streaming fix: leading-1 broadcast matmul head-duplication bug (root-caused via per-head dot isolation vs numpy) — 19/19 green, streaming tier committed.
+- Torch fp64 independent oracle added for latent-tier contract; batch + streaming both parity-match (atol 1e-4). 21/21 suite green, committed 3490497.
+- M1 acceptance per spec met: three-tier attention in MLX behind tests, torch-parity oracle green.
+- Final whole-package review dispatched (background); findings pending.
+- Next: M2 learned latent projections (training). 1M rerun still HELD for user command.
+
+## Final review fix pass — hsa commit (2026-11-08)
+
+- Reviewer (fresh context, whole package): 4 MAJOR + 5 MINOR. All fixed in one pass.
+- Ruling: skip algorithm rewritten to per-query bound-descending processing with exact-max termination (fixpoint) — previous version computed dense scores first so bounds were dead code. Exactness argument: dropped block max logit <= bound <= M - eps, weight < e^-eps.
+- Ruling: test 1 (random data, small logits) cannot produce skips by design (gap 20 >> logit spread) — drop assertion moved to crafted zero-block test; random-data test pins causal-visibility bounds instead.
+- Suite 27/27 green (was 21). MLX pitfall re-check by reviewer: no remaining 2D@3D or leading-1 broadcast matmuls.
+
+## M2 start — plan docs/superpowers/plans/2026-11-08-hsa-m2-training.md (2026-11-08)
+
+- 5 tasks: torch combined tier -> distill loop smoke -> corpus -> 950DT run -> MLX RULER sweep.
+- Builder rulings R1-R6 locked in plan (loss = attention-output MSE + hidden MSE vs frozen dense teacher; trainable = injected projections only, LoRA fallback; d_latent 2048; window 4096 / block 2048; landmark = block first token).
+- 1M rerun still HELD for user command.
+
+## M2 Task 1+2 complete — commits ea95515, c0277d2, dtype-leak fix (2026-11-08)
+
+- Task 1: torch combined three-tier attention (window + landmark exact + latent), fp64-ref parity, self-query no-self-averaging invariance, learned-projection path, partial-block seq.
+- Task 2: distill loop smoke green on tiny 2-layer transformer; frozen-base zero-grad pinned; truncation-identity init = M1 default at step 0.
+- Ruling: latent VALUES stay in dv space (w_v is (dv,dv) at most); only keys projected to d_latent.
+- Ruling: test_landmark property = invariance to own-block non-window content (window-only expectation was wrong: earlier blocks are legitimately visible).
+- Fixed: torch.set_default_dtype(float64) global leak broke random-order suite. 33/33 green.
+- Next: Task 3 corpus pipeline, then Task 4 950DT run.
+
+## M2 Task 3 complete — commit a2d3420 (2026-11-08)
+
+- Corpus pipeline: fineweb-edu via hf-mirror, length-binned int32 shards + manifest; 20MB smoke verified (decode roundtrip, EOS, 645 seqs), smoke data cleaned.
+
+## M2 Ruling R7 — latent architecture fix (2026-11-08)
+
+- Gap found: per-head latent projection degenerates on real Qwen (head_dim 128 < d_latent 2048 = zero-pad).
+- R7: latent key = block-mean over CONCATENATED kv heads (hkv*128=1024) -> W_k_lat 1024->2048; latent query = token-concat (8192) -> W_q_lat ->2048; ONE shared latent logit per (query, block), broadcast across heads inside each head's softmax. Latent value = block-mean v per kv head (GQA-expanded). Matches LSA d2048 map precedent (heavy-key-and-query).
+- Init: W_q_lat/W_k_lat near-zero -> student starts as window+landmark only, latents learn from zero (safe).
+- Window-only M1 kernels remain the per-head fallback; shared path added to torch_tier, then vectorized torch kernel (per-query loop unusable at seq 4096 training).
+
+## M2 Task 2.5 complete — commit c543cf8 (2026-11-08)
+
+- Vectorized batched three-tier torch kernel (window + landmark + shared latent, GQA, partial blocks) — fp64 parity, batch-invariance, gradient-flow tests. 37/37 suite green.
+- Ruling: asymmetric init W_q_lat ~ N(0,1e-3) / W_k_lat = 0 (zero-zero init kills both grads; this lights w_k first, w_q second step).
+- Ruling: loop torch_tier stays per-head fallback/reference; fast kernel is the training path.
+- Next: HF Qwen3 tiny-config integration smoke locally, then 950DT upload + run.
+
+## M2 Task 4 prep complete (2026-11-08)
+
+- Kernel perf ruling: broadcast-multiply materialized (B,T,Hq,W,D) = 137GB/layer at real dims -> grouped kv-head matmul rewrite (c78fed5), parity suite green.
+- Training entry 15fe0f4: same-weights teacher via per-step tier-mode toggle (no 27B model copy), hidden-MSE + student LM loss, bf16 tier weights (follows model dtype), gradient checkpointing, durable ckpt/JSON logs. Tiny end-to-end smoke RC=0.
+- 950DT scripts committed (tunnel/upload-sha256/sanity/train/status). Corpus: fineweb-edu 10BT shard fix (100BT shards sorted first - killed, filtered, relaunched), ~1.1GB/6min download rate.
+- Train window ruling: W=512, block=2048, seq 4096 (window 4096 would make train memory = dense; window is a design free variable per spec).
+- MPS note: MPSGraph INT_MAX dim limit blocks full-scale local validation; correctness pinned by fp64 parity at small dims, scale validated on NPU in sanity phase.
+- Next: corpus done -> upload (~8GB) -> 100-step sanity (memory <80% check) -> 8000-step full run.
+
+## M2 Task 4 — 950DT execution (1108)
+
+- Ruling R8: real Qwen3.8-27B is hybrid, not plain Qwen3. 64 layers = 48 GatedDeltaNet linear-attn + 16 full self_attn (indices ≡3 mod 4), hq=24 hkv=4 head_dim=256, q_proj emits 2x head dim with sigmoid output gate. Tier injection targets the 16 full-attn layers only; trainable ≈ 300M (was 900M estimate). d_latent concat dims: k 4*256=1024, q 24*256=6144 — attach code already config-driven. qwen3_tier.py rewritten (commit 8545f65); suite 38/38; single-layer real-config check: tier fwd finite, w_k_lat grad 0.0159, w_q_lat 0 (asymmetric init as designed).
+- Ruling R9: 950DT only has W8A8 MindIE-quantized copies (quant_model_weights-*.safetensors) — not trainable via HF. Downloading bf16 Qwen/Qwen3.8-27B (~54GB) from hf-mirror to /mnt/sfs_turbo/dahai/hsa_probe/models/qwen38-27b-bf16 inside container. Sanity run deferred until weights land.
+- Two run_m2.sh launcher bugs fixed en route: tar layout put remote_train.sh under scripts/950dt/ (path fixed); PYTHONPATH=$DIR/src missing (ModuleNotFoundError hsa).
+- Ruling R10: vllm-ascend container (qwen38-27b-dp8-bt32k) crashloops on its own serve config (super-kernel assert) — pre-existing, not touched. Spawned dedicated `hsa-train` container (same image vllm-ascend:v0.30.0-a5, same mounts/devices, --network host, sleep infinity) for M2 training; run_m2.sh prefers hsa-train. Bridge network has no DNS in this env — host network required (download died once on name resolution).
+- Sanity PASS (1108 09:07-09:31): hybrid-aware attach/enable on 16 full-attn layers; OOM root cause = model.train() missing (grad ckpt inert in eval mode, all layers kept backward graphs at 91GB card); second fix single student forward; ckpt save crashed on GatedDeltaNet layers (fixed, 5-step validation ckpt_5.pt saved then cleaned). Loss 6.58→5.83→5.03 (steps 0/10/50), s_lm 3.90→2.70, t_lm ~2.0. Throughput ~12s/step (teacher fwd + student fwd/bwd, seq 4096, 1 card). Full 8000-step run launched as full_1108_0932.log (~27h ETA). Commits 8545f65, 8b9c85c.
+
+## 1M v5 outcome (1109 morning)
+
+- v5 prefill COMPLETE: 1095638/1095638, 17:54->05:37 (~26 tps avg), phys peak 108.65GB/128GB, zero enforcer events, machine alive. v4 SoC-reset blocker at 986k cleared.
+- v5 decode FAIL before first token: metal::malloc "Resource limit (499000) exceeded" inside fusion_lsa/core/ward.py ward_rounds during decode-start index rebuild; secondary "no Stream(gpu,2)". Bytes healthy (active 78GB, phys 108GB) -> ~500k LIVE Metal buffer count exhaustion over 534-chunk prefill, not an OOM. ward_rounds is tiny (blocks=1, pools=64) - straw not cause.
+- Fixes: ward_rounds eval-flush every 64 merge iterations (fusion-lsa); env-gated gc count of live mx.array per memcheck:chunk, HSA_COUNT_MX_ARRAYS=1 (fusion-mlx b70a83c / 07d308f). v6 launched with instrumentation; next run either survives or pinpoints the leaking subsystem via live_arrays curve.
+- 950DT: step 3540/8000 at 05:48 CST, 7 ckpts (500..3500), healthy, ETA ~15.5h. Note: container clock is UTC - do not misread log timestamps.
+
+## M3 task list (accumulating)
+
+- M3-T1: threshold routing short/long ctx at serving layer (fusion-mlx). Prompt token count known before prefill: T < threshold -> dense attention path, T >= threshold -> LSA path. Threshold TBD 16k-32k from M0 dense curve + M3 real measurements. Prefix cache must be isolated per path (same prefix has different KV representations). Rationale: tier attention is bitwise-dense for T<=W(512) so quality is smooth; routing removes LSA index/paging overhead that is pure loss at short ctx. RULER 4k/32k already 1.0; 32k 1.5 tps regression was TQ kernel bug #1513/#2686, not LSA.
+
+## M2 Task 4 COMPLETE (1109 21:10 CST)
+
+- Full 8000-step distill run done on 950DT: final_loss 5.15, s_lm 3.90->3.04, t_lm ~2.0 (12.4s/step, 27.6h, zero crashes). Curve: loss 6.58->5.55(2k)->5.41(4k)->~6(6k, batch variance)->5.82(8k). 7 intermediate ckpts (500..3500) + ckpt_8000 on remote.
+- ckpt_8000.pt (448.5MiB tier weights, 16 full-attn layers) + train_log.json pulled to /Users/dahai/fusion/hsa/results/m2_ckpt/, sha256 4679627c... verified local==remote.
+- Note: mid-run loss upticks (6.1@6k, 6.6@7970) are single-sample batch variance, not divergence - s_lm trend monotone down.
+- Next: Task 5 - torch ckpt -> eval converter + RULER sweep 4k/32k/128k x 3 seeds vs 0.99 ratio floor (one-vote-veto). Eval first pass on 950DT via torch tier mode; MLX-side integration is M3.
+
+## M2 Task 5 debug log (1109 evening)
+- Smoke hit=False root-cause chain: (1) tier forward had NO decode path - generate() fed T=1 with past_key_values ignored -> gibberish. Fixed: TierLayerCache (hsa/src/hsa/eval/tier_cache.py) mirrors kernel decode-row semantics; parity vs three_tier_attention_fast exact (fp32, two shapes). Commit 94f3c10.
+- (2) Still failed with trained ckpt even with needle INSIDE window (4k depth 0.95). Controls: dense hit=True; tier-untrained hit=True (fluent); tier-trained gibberish loops. Teacher-forced tail NLL on same prompt: trained 2.92 < untrained 3.09 < dense 3.51 -> prefill/weights fine, collapse is autoregressive drift under the trained latent tier (only trained component; window/landmark tiers are parameter-free).
+- attach_tier_weights device bug fixed (params were cpu on NPU). Ruler CLI: --window --block-size --dense --no-ckpt. Commits 94f3c10, cf2764e.
+- Structural risk noted: block-first-token landmarks + block-mean latent cannot see a needle at arbitrary depth (4k d0.75 unreachable with window 512). In-window retrieval works untrained. Full RULER 0.99 at all depths likely needs query-dependent retrieval (LSA-style) at decode - matches spec "decode reuses the same structures (LSA decode is the special case)".
+- RUNNING: 9-ckpt sweep on 950DT (500..8000 x 3 cases 4k) results/ckpt_sweep.json; 1M v6 prefill 1047k/1095k at 22:07, decode phase (v5 crash point) next.
+
+## M2 Task 5 sweep verdict (1109 night)
+- 9-ckpt sweep (500..8000 x 4k d0.95/d0.75/d0.5): ALL 0/9x3. Even step-500. Dense control + untrained-tier control both hit at 4k d0.95.
+- Mass-split probe: untrained latent mass 0%, trained 87.5% avg over 16 layers, latent logit 660 vs window ~20. Latent tier dominates attention after training.
+- Teacher-forced NLL: trained 2.92 < untrained 3.09 < dense 3.51 -> trained equilibrium is latent-dominant "gist register"; helps LM loss, collapses free generation.
+- Clamp experiments (latent logit +-20 prefill+decode, then +-2): generation still degenerate with any nonzero latent mass; block-mean-v injection is a loop attractor. Not a code bug - eval infra verified (parity exact, dense/untrained controls pass).
+- STRUCTURAL: window+first-token-landmarks+mean-latent has no path to an arbitrary-depth needle (d0.75 at 4k: needle 1024 tokens from query, window 512, needle not at any landmark, drowned in block mean). G2 (RULER 0.99 all depths) unreachable with this design as-is.
+- Decision needed (user): (a) pivot decode/prefill to query-dependent retrieval (LSA bucket index over stored keys - spec already hints "decode reuses the same structures (LSA decode is the special case)"), (b) redesign landmarks as data-dependent selection, or (c) accept tier for throughput + LSA for retrieval hybrid. M2 training artifacts (16 ckpts + logs) preserved.
+- Commits: 94f3c10 (TierLayerCache decode), cf2764e (diag + CLI), working tree: latent_clamp plumbing kernel+tier_cache+ruler.
+
+## 1M v6 outcome (1109 23:22)
+- Prefill COMPLETE: 1095638/1095638, 15.4h wall, active 78.19GB / peak 83.74GB / phys 110.58GB stable, live_arrays flat 1189 (telemetry verified true-positive locally). v4 SoC-reset blocker stays cleared.
+- Decode start DIED same as v5: metal::malloc Resource limit (499000) exceeded. Crash site: fusion_lsa/core/ward.py:78 ward_rounds inner per-i update loop, called from incremental.py:36 append_keys build_buckets (first full-index ward over 1M).
+- Paradox: ~499k live Metal buffers vs only 1189 Python mx.array (101.94GB bytes OK). Per-64 eval flush (v6 fix) did not prevent. Leak mechanism NOT identified: candidates (a) pending lazy-graph intermediates not visible to gc count, (b) per-i loop churn interacting with async queue, (c) buffers held by round-level (G,P,P) temporaries. MLX exposes no buffer count to confirm.
+- Next lever: vectorize ward_rounds inner loop (mutual pairs are disjoint by construction -> single scatter/matmul update), eliminating the Python per-i chain; plus buffer-count observability (MLX-side) before burning v7 15h.
+- Decision coupling: ward lives in the LSA decode path; if user picks pivot A (tier prefill + LSA retrieval) ward stays and this fix matters; pivot C makes it moot.
+
+## ward_rounds vectorized (1110 00:10)
+- Inner per-pair loop replaced with one grid pass per round: kept-side recv grid (take_along_axis transfers absorbed keys), absorbed-side gone grid (alive kill + parent pointer). Disjointness proof: best[j] unique => a pool is kept by at most one partner and absorbed at most once, no intra-round chains.
+- First attempt had kept/absorbed grids inverted (delta added onto absorbed, doubling); caught by parity test vs sequential reference kept in test file.
+- Parity 5/5 random cases, partition/cap property test, full suite 49/49. Commit in fusion-lsa.
+- v7 implication: decode-start ward no longer queues a per-pair lazy chain. If the 499k buffer leak is the ward loop (now most likely given the exact crash site), v7 decode survives; if not, next crash site will localize the remaining leak.
+
+## Architecture decision (1110 07:33, user approved)
+- Pivot A CONFIRMED: tier prefill + LSA query-dependent retrieval at decode. Rationale: NIAH needs query-dependent retrieval (fixed landmarks/mean latent cannot see arbitrary-depth needle - proven by 9-ckpt sweep + controls); LSA decode retrieval already passes 0.99 at 32k; spec "decode reuses the same structures (LSA decode is the special case)". M2 tier weights stay useful for prefill/gist.
+- Route: (1) v7 1M validates LSA decode path; (2) Mac ablation - ckpt_8000 tier prefill, decode variants tier/window/LSA-retrieval, quantify distribution mismatch; (3) M3 integration tier prefill into fusion-mlx + full RULER sweep vs 0.99; (4) 950DT only if ablation demands alignment distillation.
+- 950DT assets preserved in place: hsa-train container, bf16 weights, 16 ckpts. No cleanup.
+
+## Pivot A ablation prep (1110 07:56)
+- topk decode mode implemented + committed (f421b84): per-head-group exact top-k over full history at decode, simulates LSA query-dependent retrieval. Parity tests still green.
+- Ablation run DEFERRED to tonight: v7 1M prefill holds ~110GB phys on the Mac; MPS cannot also load 27B (54GB). Run after v7 bench exits (memory frees at decode/completion ~23:00).
+- 950DT returned to other teams (user); assets preserved in place; coordination required before any future NPU use.
+
+## Upstream LSA coordination (2026-11-10)
+- caciolai replied in issue #13: no integration docs yet except FORK.md (Prefrontal-AI/sglang@lsa); upstream SGLang contribution planned; better docs coming.
+- Read FORK.md: fork = serving layer only; LSA indexer is an SGLang plugin (~35 hook points, all SGLang-internal); our MLX port (PR #12) needs none of them.
+- QSA indexer weights released: qsa-weights-v1 tag, `qwen38_27b__long-16k-1M-heavy-qsa.pt` via `lsa distill inject` -> candidate baseline for M3 head-to-head on Mac (logged for M3).
+- Replied on PR #12 (comment 6756152485): port dependency summary + 2 questions (selection-semantics doc independence; qsa-weights-v1 applicability). English-only per convention.
+
+## NPU dense baseline (2026-11-10)
+- 950DT 8 cards freed (qwen38-27b-prod stopped on user coordination); hsa-train restarted.
+- Dense RULER on 27B bf16 single NPU: 4k 3/3, 32k 3/3 (max-new-tokens 512). First run with 64 tokens had a 32k miss = thinking-mode truncation, NOT model failure. Rule: all future RULER runs use --max-new-tokens 512; ablation script updated.
+- 128k dense launched; results -> results/ruler_dense_npu_*.json on remote, to fill paper 6.2/6.4 dense columns.
+- 128k dense on single NPU: OOM (89.4GiB allocated, full-length prefill, no flash fallback). Deferred: dense path needs chunked prefill (~30 lines) or 2 cards; non-critical, revisit at M3 when tier 128k sweep needs the cell.
+- Chunked prefill added to ruler_tier (chunked_generate, explicit position_ids + past_key_values; first version double-consumed the last prompt token - caught by gpt2 parity test, fixed). Commit 2114be4. 128k dense on NPU: 3/3 hits, ~62s/case. Dense floor complete: 4k/32k/128k all 1.0.
+
+## v7 + Pivot A ablation results (2026-11-10 night) — MILESTONE
+- v7: prefill complete 1315000/1315000 (15.2h, live_arrays flat 1189, mem ok). Decode ran 12 min quietly, then died at a decode-time page close: metal::malloc (499000) inside ward_rounds. NOT the ward graph (repro at serving shapes passes, even 2000-page lazy accumulation passes) - the buffer quota is process-wide and the allocator cache pool filled during 12 min of decode churn. Fix: mx.metal.clear_cache() in IncrementalBucketIndex.append (once per 512 tokens, cheap). Pending v8 validation.
+- Pivot A ablation (Mac MPS, trained ckpt_8000, topk-64 retrieval decode, 512 new tokens): d0.75 3/3, d0.95 3/3. Static tiers were 0/9 at d0.75 across all 9 checkpoints. Pivot A VALIDATED: tier prefill + query-dependent retrieval decode reaches arbitrary-depth keys.
+- 3 real bugs fixed en route (tier_cache.py topk branch): torch 2.13 MPS matmul mis-broadcast -> einsum; kx[tk] indexed dim0 with position ids -> gather along token axis; tests added (dense-attention oracle K>=T + needle retrieval K=4). Commit 986e1df.
+- max-new-tokens 512 protocol everywhere (thinking-model truncation).
+- Next: M3 (serving integration + full RULER sweep), Phase 2 torch_npu on davinci0, v8 1M rerun with clear_cache fix.
+
+## 2026-11-11 M3 + Phase 2 progress
+- M3-a kernel: hsa a841d6d (MLX three-tier kernel, 4/4 oracle parity) + a2c3f30 (q_offset chunked prefill, 5/5)
+- M3-b serving: fusion-mlx de87d872 (--tier-weights wiring) + ded96071 (ModelSettings overlay fix - flag never reached wrap, found via live boot log)
+- Tier weights exported: ~/.fusion-mlx/adapters/tier-weights-ckpt8000.safetensors (16 layers fp16, W512/B2048/L2048)
+- Phase 2 sweep2 (davinci0, torch_npu, tier prefill + raw topk-64 decode, chunk 4096): 4k 3/3, 32k 0/3, 128k 0/3. Raw-key topk-64 loses needle rank beyond 4k - motivates trained-indexer selection (LSA path) at scale
+- Diagnostic running: 32k/d0.5/topk-512 (rank coverage vs deeper failure)
+- v8: prefill ongoing, ~67GB live, healthy
+- Ruling: sweep2 32k/128k 0/3 作废 - eval 侧 tier_forward chunked prefill bug（chunk 2+ 只看本地 k/v，cache 每 chunk 重 seed），4k 单 chunk 掩盖。hsa b0c7f8e + 后续两小修：torch kernel q_offset（镜像 MLX）、cache k/v 布局、q_offset init。chunked=one-shot parity 6/6
+- 32k/d0.5 修后诊断：tier prefill + dense decode hit=True（26s）- bug 证实且修复有效
+- "raw topk 辨别力不足" 判断作废；sweep3（topk-64, chunk 4096）重跑中
+- sweep4（修后, chunk 1024, topk-64）: 4k 1/3, 32k 2/3, 128k 2/3。d0.75 3/3 全长度（128k 含）; d0.25/d0.5 摇摆。kernel mid-block parity 精确（1.8e-7）— 摇摆 = bf16 数值序 + latent 塌缩外推噪声, 非 kernel 逻辑
+- memory hygiene: per-case tier cache 释放 + npu.empty_cache（OOM 蠕升 2GB/case 修复, hsa）; 128k 窗口 gather 需 chunk 1024
+- clamp-2.0 诊断跑中（seeds 42/43, 6 case）
+- clamp 2.0 诊断 6/6（基线 2/6）— §4.3 latent 塌缩确证为摇摆根因, clamp 定为 serving 头牌配置
+- sweep5 全量 9-case + clamp 2.0 跑中（davinci0）; serving 侧 --tier-latent-clamp 接线完成（fusion-mlx 73d327f, tests 5/5 + lsa 102 pass）
+- sweep5（clamp 2.0 全量）: 各长度 2/3。反转：seed41(d0.75) 全灭（无 clamp 时 3/3），42/43 全中。clamp 2.0 压死 latent 信号 — 与 sweep4 完全互补。结论：非单调，中间值可能双赢，clamp 4.0/6.0 跑中（sweep6）
+- sweep6: clamp 4.0 = 5/9（41 仍 0/3, 42 3/3, 43 2/3）; clamp 6.0 = 4/9。无单点 clamp 双赢 — 硬 clamp 非正解
+- 根因假设升级: latent logits 塌缩 ~660 尺度, bf16 ULP≈4 → 相对差被舍入, 排序信号毁。正解 = latent 路径 fp32（torch_tier_fast q_lat/k_lat/slt/softmax 全 fp32）; parity 6/6 过; sweep7（无 clamp + fp32）跑中
+- sweep7（fp32, 无 clamp）: 6/9。seed41 3/3 保住 + 128k 首次 3/3 满分。残余: 4k 42/43 + 32k 43。fp32 严格 ≥ bf16。commit f06cfcc。sweep8（fp32+clamp2.0 交互）跑中
+- sweep8（fp32+clamp2）: 6/9, 与 bf16+clamp2 同模式（41 0/3, 42/43 6/6）— clamp 压平 latent 与 dtype 无关。fp32 与 clamp2 互补（并集 9/9）
+- 新杠杆: latent z-score（per query row 标准化, 保排序 + 塌缩尺度自动归一, 噪声行自然失效）。torch kernel --latent-zscore flag 接线（tier_forward + ruler_tier CLI）; sweep9（fp32+zscore, 无 clamp）跑中
+- 运维: davinci0 sfs_turbo cp 偶发不生效（需 md5 前后校验）; ssh 鉴权 ~50% 失败率持续
+- sweep9（fp32+zscore）: 5/9, 41 0/3 同 clamp 翻转模式 — 任何 latent 尺度变换都杀 41。eval hack 到头
+- 收官判定: fp32 原始 = 头牌（6/9, 唯一保 41 + 128k 3/3）。MLX kernel 同款 fp32 修复 + --latent-zscore flag 提交（hsa 85c7d87）。eval seed↔depth 混淆（单 seed 单深度）; 42/43 浅深度失败根因 = latent 权重未对齐, 根治在 Phase 2 训练（fp32 latent + 长序列 + 多 seed 多深度 eval）
+- 用户同意资源方案: Phase 2 主计划 1 卡 + 其余卡跑任务 4 四变体并行矩阵（teacher/CE-only × lr 5e-5/1e-4, 每变体 1 卡全课程）; eval gate 选赢家, 全败则升级 Phase 2b（检索感知损失, 新范围）。计划已改 + 提交
+- 8 卡窗口确认: 今晚 23:00 后。runner 脚本备好（hsa 72f6b6a scripts/950dt/run_phase2.sh）: 卡 0-2 eval 基线矩阵（每深度一卡, ~20min）/ 卡 3 smoke / 卡 4-7 四变体训练 / gate 卡 0-3。前置: 任务 4 代码改动（--init-ckpt/--no-teacher）+ 任务 3 corpus 上传须在 23:00 前完成
+- Phase 2 准备全完成（23:00 自动触发已挂 b3vblnesc）:
+  - 任务 4 代码: --init-ckpt/--no-teacher TDD 完成（hsa 1e35cda, 2 tests RED→GREEN）
+  - 任务 3 免做: 远端 data/ 已有全套 bins（8k:6933/16k:1579/32k:290）; runner data-dir 修正（686a497）
+  - runner 并发缺陷修复: 同卡串行链（smoke/gate）+ matrix 每深度一卡（1b18b52）
+  - 代码已同步 davinci0, 4 文件 md5 校验对; 远端 --init-ckpt/--no-teacher argparse 干跑过
+  - 23:00 启动序: tunnel → matrix(卡0-2) + smoke(卡3) + train(卡4-7) 三路并发; 训练 ~2-3h 后 gate
+- M8 v8 第一次尝试失败: watchdog 14:37 因 macOS critical 压力持续 15 轮杀 bench+server, prefill 63.4%（694272/1095638）, decode 未开始, clear_cache 未验证。压力源 = allocator cache chunk 间反弹至 23GB, phys 92GB/128GB
+- 修复: fusion-mlx-lsa-wt 56e2927 FUSION_MLX_METAL_CACHE_LIMIT env（serve boot 调 mx.metal.set_cache_limit）; relaunch_1m.sh 设 8GB cap（hsa 4cc83fe）
+- v8 重发 14:48: server+watchdog+bench 全起, cache cap 日志确认, ETA ~04:00。哨兵 bmlh3lt8a 盯 bench 进程退出
+- 旁证: 13:56 有 unknown 方拉起默认 :11434 server（pid 3928, RSS 144MB, 非压力源）
+- 23:04 Phase 2 发车。首波事故×2 已修: (1) load_init_ckpt 用 model.layers 实际是 model.model.layers → 4 变体全炸, 修复+嵌套测试过（hsa commit）; (2) smoke 的 \$seq 被远端 ssh shell 提前展开成空 → argparse 死, 改显式三连（3693e2c）
+- 23:10 全 8 卡在跑: 卡 0-2 matrix（d0.25/0.5/0.75 × 5 seeds × 3 长度）/ 卡 3 smoke 8k→16k→32k 串行 / 卡 4-7 四变体 8k 阶段（v1 teacher-5e-5, v2 CE-5e-5, v3 teacher-1e-4, v4 CE-1e-4）。v8 Mac 侧 bench 仍活。matrix 哨兵 bex2xw9ok
+- v8 终局: prefill 100%（1095638/1095638, 14.6h, cache cap 8GB 生效, phys 峰值 106.95GB）; decode 入口 05:23:51 `[metal::malloc] Resource limit (499000) exceeded` 崩 → 空 answer。prefill 路径验证过, decode 资源上限 = 新独立 bug（待定点: buffer 数量类上限, 4GB cap 或 prefill 尾部内存再压; 每次 retry 14.6h, 须先有假设）
+- 05:30 夜间战况: P2 半瘫痪。matrix 仅 d0.25 完成（15 cases）; d0.5/d0.75 无输出; smoke 8k 卡 teacher 前向 14h; v1/v3 同卡死点; v2/v4 ERR99999 Device:-1
+- 05:45 根因: 容器只挂 davinci0 + env ASCEND_RT_VISIBLE_DEVICES=0。lane 设备号 1-7 不存在 → torch 回落 CPU → 8 进程 × 27B CPU 前向 = 挂死/龟速。ERR99999 = 设备初始化失败
+- 修复战: (1) pkill 自杀陷阱（模式匹配自身 cmdline, rc=137, [] 括号技巧破）; (2) 8 设备容器重建 × 2 失败 — dmesg `uda_occupy_dev_by_ns: Conflict open udevid` + `Can't get ascend_hal device count`, 单容器多卡在此 host 上无法枚举; (3) 定稿方案: FLEET = 每卡一个单卡容器（hsa-c0..c7, 与已知可用旧容器完全同构）。卡 2 被 lsa-port 占用 → lanes = 0,1,3,4,5,6,7
+- runner 已改 fleet 拓扑（hsa b26d86f）: lane_launch/lane_exec, LANES 数组, gate lanes 0/1/3/4
+- 06:00 重发: matrix d0.5→c1, d0.75→c3, smoke 8k→c4。d0.25 基线已有不重跑。验证 4min 后 HBM 占用+日志
+- 今晚现实口径: 4 变体先跑 8k 阶段 500 步（~3-5h/变体）, gate eval 用 8k ckpt; 16k/32k 阶段下一窗口续
+- smoke 8k 真崩因（非内存）: qwen3_tier.py 训练全序列分支把 HF 布局 (B,Hkv,T,D) 的 k/v 直传 kernel；kernel 从 k.shape[2] 读 Hkv → 8k 时变 T、group=0 → grouped view 炸（`[1,8192,8192,0,256] invalid`）。eval 走 TierLayerCache 布局对所以从未炸；4k M2 训练早于向量化 kernel 所以没暴露。修复: caller transpose + kernel q.view→q.reshape（TDD: test_tier_forward_layout RED `[1,8,8,0,8]` → GREEN），hsa 5c143fb，已 md5 校验同步远端，smoke 重发 c4
+- 遗留发现: test_torch_tier_fast::test_fast_matches_fp64_reference[False] 在 HEAD~1 就失败（先于本次改动），fp64 参考精度不匹配 — 训练/eval 实证结果不受影响（RULER 全套跑过），明天排查根因
+- smoke 8k 第二轮 OOM（86.5/91.75GB, 8.11GB gather 请求）: teacher 释放后 student backward 仍爆 — 根因 = 精确 tier（window/landmark/gather/块均值）全是冻结骨干的纯函数却进了 autograd 图（8.2GB gather × 2: scores+values）
+- Ruling: 精确 tier 全部 no_grad — 可训练参数只有 latent 路径上的 w_q_lat/w_k_lat；被切断的跨层梯度（早层 latent 输出影响后层精确分数）= 二阶近似，训练信号主通道（层内 latent）保持精确。输出与新旧 kernel bit-identical 验证过。hsa ad0a6ca
+- 测试补强: test_exact_tiers_detached_latent_grads_flow（latent 梯度流 + q 梯度经 latent 路径 + k.grad None 断言）。hsa 布局测试 4/4
+- 遗留: test_torch_tier_fast fp64 参考测试 [False]+[True] 均挂（早于今晚全部改动, fp32-latent 重构期引入; 之前跑 suite 带 -x 停在 [False] 没暴露 [True]）。实证（NPU RULER 全套）不受影响, 明天修
+- matrix 基线齐二: d0.75 = 4k 5/5, 32k 3/5, 128k 4/5; d0.25 = 4k 1/5, 32k 4/5, 128k 4/5; d0.5 128k 尾段。gate 阈值即此
+- smoke attempt4 (kernel no_grad 版) 发车 c4, 监控 b8f9h9n3g
+- smoke attempt4: step=0 过（24s/step 量级!）但 step=1 student backward 仍 OOM（82.79GB active + 8.21GB vw gather）— no_grad 不够: detached gather 本身 8.2GB live/层, backward 重算期叠加 64 层 saved acts
+- 终修: gather + value matmul 按 1024 行分块（每块 ~1GB 瞬时）, scores 与 values 两侧都分块; 输出与未分块 kernel bit-identical（T=2500 多块形状验证）。hsa fc89ef4
+- v1-v3 首发带旧 kernel 已杀, 全部 4 lane（smoke c4 / v1 c5 / v2 c6 / v3 c7）带 chunked kernel 重发 06:25
+- 8k 步速基线: step0 全流程 24s → 500 步 ≈ 3.3h → ETA ~09:45（8k 阶段）; 16k/32k 阶段今晚不排, gate 直接用 8k ckpt_500
+- smoke 100 步全过（40min, ~21s/step）: loss 噪声无发散（s_lm 2.8-3.6 带内随机序列波动）, 8k 训练路径彻底打通（布局修复 + teacher 释放 + exact tier no_grad + 分块 gather 四连修）
+- v4 发车 c4 07:02（CE-only 1e-4）。全 4 变体在跑, 完成哨兵 bve4u98up（10min 轮询, 全 done 或 crash 触发）。ETA v1-v3 ~09:30 / v4 ~09:50
+- Task 1 收官: 3 深度 × 5 seeds 基线全齐（d0.25 0.2/0.8/0.8, d0.5 0.6/0.6/0.4, d0.75 1.0/0.6/0.8）。gate 判据: 变体 ≥ 基线
+
+## 2026-11-12 上午（4 卡窗口: davinci0 lanes 4-7）
+- 卡况: 0-3 已交其他组（c0/c1/c3 容器 09:00 被 137 杀）。4-7 全天可用, 16k/32k 今天闭环, 不等用户确认
+- 8k 阶段完成: v2 done 01:12 UTC (loss 3.257), v3 done 01:39 (loss 5.664), v1 done 09:42 CST, v4 ~10:00。teacher 每步 enabled/disabled 切换日志是正常步内行为, 勿误判
+- 事故 1: auto_gate 与链式 16k 抢 c6 → v2 的 16k 进程被 host OOM-killer 静默杀（无 traceback 特征）。auto_gate 已杀, 8k 中间 gate 取消（12:00 死线没了, 最终 gate 在 32k ckpt）
+- 事故 2: 16k 训练 NPU OOM（84.2GB 占 + 15.16GB fp32 logits）。根因: 全序列 lm_head logits fp32 上浮 + output_hidden_states 收全 64 层。修复 bcc2eaa: backbone 直出 last_hidden + chunked lm_head CE（每块 backward, 图即释）+ teacher CE 分块 no_grad, 梯度数学等价（单测 chunked==full, 含 /T 缩放 bug 回归）; CPU 微型 Qwen3 端到端冒烟过
+- 链式重启: v1 c5 / v2 c6 / v3 c7 已带 chunked loss 重发 16k→32k; v4 由 watcher (beub2v3d0) 8k 退出后自动接力。watcher 只扫启动后新增字节（旧 OOM 残留不误报）
+- 待办: 32k teacher 密集注意力后端未验证（若 eager 51GB/层会爆, sdpa 则无碍）; 32k ckpt 后跑最终 gate（3 深度 × 3 长度 × 5 seeds）→ 判定 vs 基线 → 导出赢家
+- 16k 全程零事故（chunked loss 生效）。v2 17:40 完成 16k → 32k OOM @90.2GB（student 激活墙, teacher 稠密注意力探针确认可通过）。修复 commit: activation offload（saved_tensors_hooks 把 >200MB 非叶子 saved tensor 搬 host RAM, ~26GB 层输入, 单测梯度等价）。v2 32k 已带 --offload-activations 重发; watcher 升级自动治愈: v1/v3/v4 32k OOM 自动带 offload 重发（限 1 次）。32k ETA: v2 明晨 ~11:00, 其余 ~12:00-13:00
+
+## 2026-11-17 (v9 launch + issue #1 closure)
+- retry question answered: retry DID execute once in v8 and failed identically; uncaught propagation (no success log line), hence 0 "retry" strings in serve.log. User's "98.7%" framing corrected: that is index key count; prefill processed 1,095,638 = 100%.
+- §5.3 updated with v8 run + v9 pending (hsa c7f8cbf); run-logs v9 row (hsa 8d93823); fusion-lsa issue #1 closed via PR #2 merge, record comment added (before=0 min, after=~2 min, ubuntu gate).
+- v9 launched 08:20 CST via hsa/scripts/relaunch_1m.sh (sed v5->v9 logs, /tmp/relaunch_1m_v9.sh): serve pid 46231 (:11555, LSA armed ceiling 108.8GB, k8v4), bench pid 46684, watchdog 46685. Prefill ETA ~16h (00:20 CST 11-18). Watchers: bench-exit until-loop + task bnolhtffk.
+- untracked adapters/ (55.7M LoRA weights from 8k smoke) left out of git deliberately.
