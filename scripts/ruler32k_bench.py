@@ -85,7 +85,7 @@ def run_once(
     first_at = None
     last_at = None
     with client.stream(
-        "POST", f"{base_url}/chat/completions", json=payload, timeout=1800.0, headers=headers
+        "POST", f"{base_url}/chat/completions", json=payload, timeout=86400.0, headers=headers
     ) as response:
         response.raise_for_status()
         for line in response.iter_lines():
