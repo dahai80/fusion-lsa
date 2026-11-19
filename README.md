@@ -49,6 +49,9 @@ Parity tests read the upstream oracle from `~/model/latent-sparse-attention/src`
 
 ## Hard boundaries
 
+- This repo is the semantics SSOT for the LSA index (ward merge, incremental
+  index, index space). Change protocol and consumer obligations live in
+  [INTERFACE.md](INTERFACE.md).
 - Selection-logic only: attention itself runs as standard SDPA over the selected keys.
 - 1M+ context requires a latent-KV architecture plus KV quantization; full-KV models do not fit
   120GB at 1M.
