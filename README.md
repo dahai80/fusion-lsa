@@ -8,7 +8,8 @@ keys are pooled and Ward-clustered into buckets, queries score bucket centroids,
 buckets, and expand them to a top-k key set beside the sink tokens and the sliding window. This
 repo ports the selection logic (not the CUDA kernels) from the
 [latent-sparse-attention](https://github.com/Prefrontal-AI/latent-sparse-attention) plain-torch
-reference, parity-tested against it as an oracle.
+reference, parity-tested against it as an oracle. Upstream attribution:
+[NOTICE.md](NOTICE.md).
 
 Status: P0 (algorithm port + parity + cost gate) complete. P1 in progress: released map converter
 (GLM-5.3-Flash, Qwen3.8-27B), index space port, page-boundary incremental index, real-checkpoint
