@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 
 def test_version_stamp_present():
-    assert fusion_lsa.__version__ == "0.2.0"
+    assert fusion_lsa.__version__ == "0.2.1"
     commit = fusion_lsa.FUSION_LSA_COMMIT
     assert commit, "FUSION_LSA_COMMIT must be a non-empty string"
     assert commit == "unknown-commit" or all(c in "0123456789abcdef" for c in commit)
