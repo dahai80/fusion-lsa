@@ -152,6 +152,53 @@ def test_buckets_concat_from_host_blocks():
     assert np.array_equal(np.array(incremental.bucket_sizes), np.array(batched.bucket_sizes))
 
 
+def test_two_thousand_appends_hold_resources_flat():
+    # Issue #4 regression: the ad-hoc v10 probe ("2,000 consecutive appends
+    # hold the resource counter flat, delta 0, active 0.1MB vs +203/close
+    # before") committed as a standing test. Guards the host-storage fix
+    # (2dc3698) whose absence killed v5/v7/v8/v9r2 at close 2113 with the
+    # 499000 MTLResource cap denial. Mutation check: reverting append to
+    # store live (or merely evaluated) mx.array blocks fails the isinstance
+    # sweep below; storing numpy views instead of detached copies fails the
+    # base-None sweep. Active-memory growth is bounded because host numpy
+    # blocks allocate zero MTL buffers per close.
+    metal = getattr(mx, "metal", None)
+    samples = []
+    keys = _keys(BLOCK * 2000)
+    mx.eval(keys)
+    active_before = metal.get_active_memory() if metal is not None else None
+    index = IncrementalBucketIndex(pool_size=4, bucket_size=8, bucket_cap=16, cluster_block_size=BLOCK)
+    for block in range(2000):
+        index.append(keys[block * BLOCK : (block + 1) * BLOCK])
+        if block % 500 == 0 and metal is not None:
+            samples.append(metal.get_active_memory() - active_before)
+        # semantics guard: sampled closes must match the eager reference
+        # partition on the same input (host storage changed no selection)
+        if block % 200 == 0:
+            with mx.stream(mx.cpu):
+                sampled = build_buckets(keys[block * BLOCK : (block + 1) * BLOCK], 4, 8, 16, BLOCK)
+            stored = index._blocks[-1]
+            expected = np.where(
+                np.asarray(sampled.bucket_members) >= 0,
+                np.asarray(sampled.bucket_members) + block * BLOCK,
+                np.asarray(sampled.bucket_members),
+            ).astype(np.int32)
+            assert np.array_equal(stored.bucket_members, expected)
+            assert np.array_equal(stored.bucket_sizes, np.asarray(sampled.bucket_sizes))
+    assert len(index._blocks) == 2000
+    for stored in index._blocks:
+        assert isinstance(stored.bucket_centroids, np.ndarray)
+        assert isinstance(stored.bucket_members, np.ndarray)
+        assert isinstance(stored.bucket_sizes, np.ndarray)
+        assert stored.bucket_centroids.base is None
+        assert stored.bucket_members.base is None
+        assert stored.bucket_sizes.base is None
+    if metal is not None:
+        growth = metal.get_active_memory() - active_before
+        logger.info("active-memory growth over 2000 appends: %d bytes (samples %s)", growth, samples)
+        assert growth < 16 * 1024 * 1024, f"append retained MTL buffers across closes (growth {growth} bytes)"
+
+
 def test_closed_blocks_stay_unchanged():
     index = IncrementalBucketIndex(pool_size=4, bucket_size=8, bucket_cap=16, cluster_block_size=BLOCK)
     index.append(_keys(BLOCK, seed=7))
