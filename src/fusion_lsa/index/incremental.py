@@ -72,30 +72,36 @@ class IncrementalBucketIndex:
         if metal is not None:
             metal.clear_cache()
         try:
-            # v8 (2026-11-17) showed the quota denial reproduces even at
-            # PREFILL-time page closes (98.7% through the 1M prefill) with
-            # ~81GB live buffers and a denied scalar allocation - clear_cache
-            # cannot fix it. The ward merge is small (one cluster block) and
-            # infrequent, so it runs on the CPU stream; unified memory lets
-            # the resulting buckets feed GPU decode kernels without a copy.
-            with mx.stream(mx.cpu):
-                block = build_buckets(keys, self.pool_size, self.bucket_size, self.bucket_cap, self.cluster_block_size)
+            # The ward merge runs on the caller's stream: the fp32 reduction
+            # order differs between CPU and GPU, and the resulting argmin-tie
+            # flips cascade into different cluster memberships (issue #7 -
+            # b066be6 forced this onto the CPU stream and the consumer oracle,
+            # which batch-builds on the GPU, selected different rows). A batch
+            # build and a page-wise build on the SAME stream are byte-equal.
+            # The quota denial from the 1M runs (v5/v7/v8) surfaces as a
+            # RuntimeError here or at the eval below - the except falls back
+            # to the CPU stream instead of killing the run.
+            block = build_buckets(keys, self.pool_size, self.bucket_size, self.bucket_cap, self.cluster_block_size)
+            mx.eval(block.bucket_centroids, block.bucket_members, block.bucket_sizes)
         except RuntimeError as exc:
-            # 1M decode-time page close hit metal::malloc Resource limit
-            # (499000) in v5/v7. Log the allocator state, flush everything
-            # pending, clear the cache once and retry before giving up - if
-            # the denial is a transient pressure spike this rides over it,
-            # otherwise the retry fails with the telemetry line right above.
-            logger.error(
-                "incremental index: page close failed, %s; snapshot %s",
+            # metal::malloc Resource limit (499000): the process-wide quota is
+            # exhausted by live GPU buffers, not total memory - clear_cache
+            # cannot fix it. The CPU stream allocates host memory, so the
+            # fallback close succeeds there. Degraded mode: that block's
+            # buckets are CPU-built and may differ from a GPU batch build in
+            # argmin ties - logged loudly so runs are attributable.
+            logger.warning(
+                "incremental index: page close failed on device, falling back to CPU stream; %s; snapshot %s",
                 exc,
                 _memory_snapshot(),
             )
             mx.synchronize(mx.default_stream(mx.default_device()))
             if metal is not None:
                 metal.clear_cache()
-            block = build_buckets(keys, self.pool_size, self.bucket_size, self.bucket_cap, self.cluster_block_size)
-            logger.info("incremental index: page close retry succeeded, snapshot %s", _memory_snapshot())
+            with mx.stream(mx.cpu):
+                block = build_buckets(keys, self.pool_size, self.bucket_size, self.bucket_cap, self.cluster_block_size)
+                mx.eval(block.bucket_centroids, block.bucket_members, block.bucket_sizes)
+            logger.info("incremental index: CPU-stream fallback close succeeded, snapshot %s", _memory_snapshot())
         logger.info(
             "incremental index: block %d appended, %d blocks, %d keys, %s",
             len(self._blocks),
@@ -112,8 +118,8 @@ class IncrementalBucketIndex:
         # after 2100+ closes this way. Even evaluated mx.arrays would retain 3
         # buffers per close (410k over a full 64-layer rebuild), so blocks are
         # copied to host numpy instead: zero MTL resources per close, and
-        # buckets() materializes one evaluated concatenation per field.
-        mx.eval(block.bucket_centroids, block.bucket_members, block.bucket_sizes)
+        # buckets() materializes one evaluated concatenation per field; the
+        # block arrays are already evaluated inside the try/fallback above.
         # np.asarray on an mx.array is a zero-copy VIEW that pins the MTL
         # buffer through numpy's base reference - one buffer per field per
         # close still walks a 64-layer rebuild into the 499000 cap. The
