@@ -26,8 +26,9 @@ def test_incremental_matches_batched():
     with mx.stream(mx.cpu):
         batched = build_buckets(keys, 4, 8, 16, BLOCK)
     index = IncrementalBucketIndex(pool_size=4, bucket_size=8, bucket_cap=16, cluster_block_size=BLOCK)
-    for block in range(4):
-        index.append(keys[block * BLOCK : (block + 1) * BLOCK])
+    with mx.stream(mx.cpu):
+        for block in range(4):
+            index.append(keys[block * BLOCK : (block + 1) * BLOCK])
     incremental = index.buckets()
     assert np.array_equal(np.array(incremental.bucket_centroids), np.array(batched.bucket_centroids))
     assert np.array_equal(np.array(incremental.bucket_members), np.array(batched.bucket_members))
@@ -46,13 +47,32 @@ def test_append_runs_without_metal_module(monkeypatch):
     assert index._key_count == BLOCK
 
 
-def test_append_wards_on_cpu_stream(monkeypatch):
-    # The 1M runs (v5/v7/v8) all died in this exact call when it ran on the
-    # Metal device: the ward merge's allocations were denied by the
-    # process-wide Metal buffer quota at ~81GB of live buffers. Page closes
-    # are infrequent (one per cluster block), so the merge must run on the
-    # CPU stream; unified memory means the resulting buckets feed GPU decode
-    # kernels without a copy.
+def test_append_matches_batched_on_default_stream():
+    # Issue #7 regression: b066be6 forced the page-close ward merge onto the
+    # CPU stream, and the CPU vs GPU fp32 reduction order flipped argmin ties
+    # into different cluster memberships - the consumer oracle (batch build
+    # on the default stream) then selected different rows. The page close
+    # must run on the caller's stream so the incremental index stays
+    # byte-equal to a batch build on that same stream.
+    keys = _keys(BLOCK * 4)
+    batched = build_buckets(keys, 4, 8, 16, BLOCK)
+    mx.eval(batched.bucket_centroids, batched.bucket_members, batched.bucket_sizes)
+    index = IncrementalBucketIndex(pool_size=4, bucket_size=8, bucket_cap=16, cluster_block_size=BLOCK)
+    for block in range(4):
+        index.append(keys[block * BLOCK : (block + 1) * BLOCK])
+    incremental = index.buckets()
+    mx.eval(incremental.bucket_centroids, incremental.bucket_members, incremental.bucket_sizes)
+    assert np.array_equal(np.array(incremental.bucket_centroids), np.array(batched.bucket_centroids))
+    assert np.array_equal(np.array(incremental.bucket_members), np.array(batched.bucket_members))
+    assert np.array_equal(np.array(incremental.bucket_sizes), np.array(batched.bucket_sizes))
+
+
+def test_append_follows_caller_stream(monkeypatch):
+    # The page close builds on whatever stream the caller is on. Callers on
+    # the CPU stream (long-context jobs that pre-build their index on CPU)
+    # keep CPU-side byte parity with their own batch reference; the metal
+    # quota is only ever hit with large live GPU buffers, which a CPU-stream
+    # caller does not have.
     import fusion_lsa.index.incremental as inc
 
     streams = []
@@ -64,8 +84,35 @@ def test_append_wards_on_cpu_stream(monkeypatch):
 
     monkeypatch.setattr(inc.mx, "stream", spy)
     index = IncrementalBucketIndex(pool_size=4, bucket_size=8, bucket_cap=16, cluster_block_size=BLOCK)
-    index.append(_keys(BLOCK))
+    with mx.stream(mx.cpu):
+        index.append(_keys(BLOCK))
     assert mx.cpu in streams
+
+
+def test_append_falls_back_to_cpu_on_resource_error(monkeypatch, caplog):
+    # The 1M runs (v5/v7/v8) hit the process-wide 499000 MTLResource cap at
+    # prefill-time page closes with ~81GB of live GPU buffers: the GPU build
+    # of the ward merge is denied a scalar allocation. The close must then
+    # retry on the CPU stream - unified memory lets the resulting buckets
+    # feed GPU decode kernels without a copy - instead of killing the run.
+    import fusion_lsa.index.incremental as inc
+
+    calls = []
+    orig_build = inc.build_buckets
+
+    def flaky(keys, *args):
+        calls.append(len(calls))
+        if len(calls) == 1:
+            raise RuntimeError("metal::malloc is not allowed to allocate 4 bytes")
+        return orig_build(keys, *args)
+
+    monkeypatch.setattr(inc, "build_buckets", flaky)
+    index = IncrementalBucketIndex(pool_size=4, bucket_size=8, bucket_cap=16, cluster_block_size=BLOCK)
+    with caplog.at_level(logging.WARNING, logger="fusion_lsa.index.incremental"):
+        index.append(_keys(BLOCK))
+    assert len(calls) == 2, "append did not retry the page close on the CPU stream"
+    assert index._key_count == BLOCK
+    assert any("falling back" in r.getMessage().lower() for r in caplog.records)
 
 
 def test_append_cpu_stream_matches_batched():
@@ -73,8 +120,9 @@ def test_append_cpu_stream_matches_batched():
     with mx.stream(mx.cpu):
         batched = build_buckets(keys, 4, 8, 16, BLOCK)
     index = IncrementalBucketIndex(pool_size=4, bucket_size=8, bucket_cap=16, cluster_block_size=BLOCK)
-    for block in range(2):
-        index.append(keys[block * BLOCK : (block + 1) * BLOCK])
+    with mx.stream(mx.cpu):
+        for block in range(2):
+            index.append(keys[block * BLOCK : (block + 1) * BLOCK])
     incremental = index.buckets()
     assert np.array_equal(np.array(incremental.bucket_centroids), np.array(batched.bucket_centroids))
     assert np.array_equal(np.array(incremental.bucket_members), np.array(batched.bucket_members))
@@ -144,8 +192,9 @@ def test_buckets_concat_from_host_blocks():
     with mx.stream(mx.cpu):
         batched = build_buckets(keys, 4, 8, 16, BLOCK)
     index = IncrementalBucketIndex(pool_size=4, bucket_size=8, bucket_cap=16, cluster_block_size=BLOCK)
-    for block in range(2):
-        index.append(keys[block * BLOCK : (block + 1) * BLOCK])
+    with mx.stream(mx.cpu):
+        for block in range(2):
+            index.append(keys[block * BLOCK : (block + 1) * BLOCK])
     incremental = index.buckets()
     assert np.array_equal(np.array(incremental.bucket_centroids), np.array(batched.bucket_centroids))
     assert np.array_equal(np.array(incremental.bucket_members), np.array(batched.bucket_members))
@@ -173,10 +222,11 @@ def test_two_thousand_appends_hold_resources_flat():
         if block % 500 == 0 and metal is not None:
             samples.append(metal.get_active_memory() - active_before)
         # semantics guard: sampled closes must match the eager reference
-        # partition on the same input (host storage changed no selection)
+        # partition on the same input and stream (host storage changed no
+        # selection); the close now follows the caller's stream (issue #7)
         if block % 200 == 0:
-            with mx.stream(mx.cpu):
-                sampled = build_buckets(keys[block * BLOCK : (block + 1) * BLOCK], 4, 8, 16, BLOCK)
+            sampled = build_buckets(keys[block * BLOCK : (block + 1) * BLOCK], 4, 8, 16, BLOCK)
+            mx.eval(sampled.bucket_members, sampled.bucket_sizes)
             stored = index._blocks[-1]
             expected = np.where(
                 np.asarray(sampled.bucket_members) >= 0,
