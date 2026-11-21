@@ -1,5 +1,7 @@
 import importlib
 import logging
+import tomllib
+from pathlib import Path
 
 import fusion_lsa
 
@@ -7,7 +9,9 @@ logger = logging.getLogger(__name__)
 
 
 def test_version_stamp_present():
-    assert fusion_lsa.__version__ == "0.2.2"
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    declared = tomllib.loads(pyproject.read_text())["project"]["version"]
+    assert fusion_lsa.__version__ == declared
     commit = fusion_lsa.FUSION_LSA_COMMIT
     assert commit, "FUSION_LSA_COMMIT must be a non-empty string"
     assert commit == "unknown-commit" or all(c in "0123456789abcdef" for c in commit)
