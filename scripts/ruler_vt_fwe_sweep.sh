@@ -41,9 +41,10 @@ for i in $(seq 1 120); do
 done
 echo "tier server ready on :${PORT}"
 
-# 2. sweeps: {niah control, vt, fwe} x {32k, 128k} x seeds 41-43, 512-token budget
-# one seed per invocation: distinct seeds bypass the server response cache
-for TASK in niah vt fwe; do
+# 2. sweeps: {niah control, vt, fwe, qa, cwe} x {32k, 128k} x seeds 41-43,
+# 512-token budget. One seed per invocation: distinct seeds bypass the
+# server response cache.
+for TASK in niah vt fwe qa cwe; do
     for LEN in 32000 131072; do
         for SEED in 41 42 43; do
             "${PY}" scripts/ruler32k_bench.py \
