@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from ruler32k_bench import build_fwe_prompt, build_vt_prompt
+from ruler32k_bench import build_cwe_prompt, build_fwe_prompt, build_qa_prompt, build_vt_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -67,3 +67,37 @@ def test_fwe_dominates_across_lengths(target, seed):
         c for w, c in counts.items() if w not in coded
     )
     logger.info("fwe dominance at %d tokens ok", target)
+
+
+def test_qa_gold_fact_present_and_key_unique():
+    prompt, city = build_qa_prompt(4000, seed=41)
+    assert city in prompt, "gold city must appear in context"
+    question = prompt.split("\n\n")[-1]
+    key = re.search(r"grasveld-\d+", question).group(0)
+    # the questioned key's fact names the gold city exactly once in context
+    fact = re.search(rf"The {re.escape(key)} partnership agreement was signed in (\w+)", prompt)
+    assert fact is not None, "gold fact missing for the questioned key"
+    assert fact.group(1) == city
+    logger.info("qa ok: key=%s city=%s", key, city)
+
+
+def test_qa_distractor_cities_differ():
+    prompt, city = build_qa_prompt(4000, seed=42)
+    key = re.search(r"grasveld-\d+", prompt.split("\n\n")[-1]).group(0)
+    # no distractor fact may use the gold city
+    for m in re.finditer(r"The (kelvor-\d+) partnership agreement was signed in (\w+)", prompt):
+        assert not (m.group(2) == city), f"distractor {m.group(1)} reuses gold city"
+    logger.info("qa distractors ok, city=%s", city)
+
+
+@pytest.mark.parametrize("target,seed", [(2000, 41), (32000, 42)])
+def test_cwe_common_words_tie_and_dominate(target, seed):
+    prompt, coded = build_cwe_prompt(target, seed=seed)
+    assert len(coded) == 10
+    words = prompt.split("\n\n")[0].split()
+    counts = Counter(words)
+    coded_counts = {counts[w] for w in coded}
+    assert len(coded_counts) == 1, f"common words must tie: {coded_counts}"
+    filler_max = max(c for w, c in counts.items() if w not in coded)
+    assert min(coded_counts) > filler_max, (coded_counts, filler_max)
+    logger.info("cwe ok at %d: count=%s filler_max=%d", target, coded_counts, filler_max)
