@@ -90,8 +90,13 @@ def build_vt_prompt(target_tokens: int, seed: int, hops: int = 4):
 
 def build_fwe_prompt(target_tokens: int, seed: int):
     rng = random.Random(seed)
-    # 3 coded words with decreasing counts well above any filler word count
-    coded = [f"krovex{rng.randint(100, 999)}" for _ in range(3)]
+    # 3 coded words with decreasing counts well above any filler word count;
+    # drawn collision-free so the ground-truth set always has 3 distinct words
+    coded: list[str] = []
+    while len(coded) < 3:
+        word = f"krovex{rng.randint(100, 999)}"
+        if word not in coded:
+            coded.append(word)
     counts = [max(8, target_tokens // 40), max(6, target_tokens // 55), max(5, target_tokens // 80)]
     filler_count = target_tokens // 2 - sum(counts)
     words = _filler_words(rng, max(1, filler_count))
@@ -100,6 +105,82 @@ def build_fwe_prompt(target_tokens: int, seed: int):
             words.insert(rng.randrange(len(words) + 1), word)
     question = FWE_QUESTION_TEMPLATE
     prompt = " ".join(words) + "\n\n" + question
+    return prompt, coded
+
+
+# --- RULER QA: one fact-bearing passage among distractor essays ---
+QA_FACT_TEMPLATE = (
+    "The {key} partnership agreement was signed in {city}, and the "
+    "ceremony lasted exactly {days} days. "
+)
+QA_QUESTION_TEMPLATE = (
+    "In which city was the {key} partnership agreement signed?"
+)
+QA_CITIES = [
+    "Ravensburg", "Thornbury", "Calderdale", "Mistelbach", "Ostrowiec",
+    "Velenje", "Koprivnica", "Almelo", "Sonderborg", "Larvik",
+]
+
+
+def build_qa_prompt(target_tokens: int, seed: int, distractors: int = 7):
+    rng = random.Random(seed)
+    key = f"grasveld-{rng.randint(1000, 9999)}"
+    gold_city = rng.choice(QA_CITIES)
+    days = rng.randint(2, 9)
+    other_cities = [c for c in QA_CITIES if c != gold_city]
+    rng.shuffle(other_cities)
+    gold_passage = QA_FACT_TEMPLATE.format(key=key, city=gold_city, days=days)
+    # distractor essays mention other keys' agreements in other cities —
+    # the question key must match only the gold passage
+    passages = [
+        QA_FACT_TEMPLATE.format(
+            key=f"kelvor-{rng.randint(1000, 9999)}",
+            city=other_cities[i % len(other_cities)],
+            days=rng.randint(2, 9),
+        )
+        for i in range(distractors)
+    ]
+    insert_at = rng.randrange(len(passages) + 1)
+    passages.insert(insert_at, gold_passage)
+    filler_words = _filler_words(rng, max(1, target_tokens // 2 - 40 * len(passages)))
+    third = max(1, len(filler_words) // (len(passages) + 1))
+    chunks = []
+    fill_pos = 0
+    for passage in passages:
+        chunks.append(" ".join(filler_words[fill_pos:fill_pos + third]))
+        fill_pos += third
+        chunks.append(passage)
+    context = " ".join(chunks)
+    prompt = context + "\n\n" + QA_QUESTION_TEMPLATE.format(key=key)
+    return prompt, gold_city
+
+
+# --- RULER CWE: 10 coded words with equal frequency, all must be named ---
+CWE_QUESTION_TEMPLATE = (
+    "What are the 10 most common words in the provided text? "
+    "Answer with the 10 words separated by commas."
+)
+
+
+def build_cwe_prompt(target_tokens: int, seed: int, common: int = 10):
+    rng = random.Random(seed)
+    # every common word appears the same number of times (RULER CWE
+    # semantics: a set of equally frequent coded words); filler words are
+    # unique coded tokens appearing once, so the top-10 set is exact.
+    # Drawn collision-free: random draws from 900 would collide ~5% of the
+    # time at common=10 and silently shrink the ground truth to 9 words.
+    coded: list[str] = []
+    while len(coded) < common:
+        word = f"myrvik{rng.randint(100, 999)}"
+        if word not in coded:
+            coded.append(word)
+    repeats = max(3, target_tokens // 200)
+    filler_count = target_tokens // 2 - common * repeats
+    words = _filler_words(rng, max(1, filler_count))
+    for word in coded:
+        for _ in range(repeats):
+            words.insert(rng.randrange(len(words) + 1), word)
+    prompt = " ".join(words) + "\n\n" + CWE_QUESTION_TEMPLATE
     return prompt, coded
 
 
@@ -196,9 +277,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--task",
-        choices=["niah", "vt", "fwe"],
+        choices=["niah", "vt", "fwe", "qa", "cwe"],
         default="niah",
-        help="RULER subtask: niah (single needle), vt (variable tracking chain), fwe (frequent words)",
+        help="RULER subtask: niah (single needle), vt (variable tracking chain), fwe (frequent words), qa (fact-bearing passage among distractors), cwe (common words)",
     )
     args = parser.parse_args()
 
@@ -210,6 +291,11 @@ def main() -> None:
         prompt, expected = build_vt_prompt(args.length, seed=args.seed)
     elif args.task == "fwe":
         prompt, coded = build_fwe_prompt(args.length, seed=args.seed)
+        expected = ", ".join(coded)
+    elif args.task == "qa":
+        prompt, expected = build_qa_prompt(args.length, seed=args.seed)
+    elif args.task == "cwe":
+        prompt, coded = build_cwe_prompt(args.length, seed=args.seed)
         expected = ", ".join(coded)
     else:
         prompt, expected = build_prompt(
