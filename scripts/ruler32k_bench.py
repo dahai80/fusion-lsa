@@ -90,8 +90,13 @@ def build_vt_prompt(target_tokens: int, seed: int, hops: int = 4):
 
 def build_fwe_prompt(target_tokens: int, seed: int):
     rng = random.Random(seed)
-    # 3 coded words with decreasing counts well above any filler word count
-    coded = [f"krovex{rng.randint(100, 999)}" for _ in range(3)]
+    # 3 coded words with decreasing counts well above any filler word count;
+    # drawn collision-free so the ground-truth set always has 3 distinct words
+    coded: list[str] = []
+    while len(coded) < 3:
+        word = f"krovex{rng.randint(100, 999)}"
+        if word not in coded:
+            coded.append(word)
     counts = [max(8, target_tokens // 40), max(6, target_tokens // 55), max(5, target_tokens // 80)]
     filler_count = target_tokens // 2 - sum(counts)
     words = _filler_words(rng, max(1, filler_count))
@@ -161,8 +166,14 @@ def build_cwe_prompt(target_tokens: int, seed: int, common: int = 10):
     rng = random.Random(seed)
     # every common word appears the same number of times (RULER CWE
     # semantics: a set of equally frequent coded words); filler words are
-    # unique coded tokens appearing once, so the top-10 set is exact
-    coded = [f"myrvik{rng.randint(100, 999)}" for _ in range(common)]
+    # unique coded tokens appearing once, so the top-10 set is exact.
+    # Drawn collision-free: random draws from 900 would collide ~5% of the
+    # time at common=10 and silently shrink the ground truth to 9 words.
+    coded: list[str] = []
+    while len(coded) < common:
+        word = f"myrvik{rng.randint(100, 999)}"
+        if word not in coded:
+            coded.append(word)
     repeats = max(3, target_tokens // 200)
     filler_count = target_tokens // 2 - common * repeats
     words = _filler_words(rng, max(1, filler_count))

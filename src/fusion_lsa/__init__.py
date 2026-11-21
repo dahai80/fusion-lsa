@@ -10,11 +10,20 @@ __version__ = "0.2.3"
 def _resolve_commit():
     # Best-effort implementation stamp for run provenance: env override,
     # then the git worktree containing this source tree, else unknown.
+    # Walks up from src/fusion_lsa/ to the repo root: under pip install -e
+    # the package dir itself holds no .git.
     commit = os.environ.get("FUSION_LSA_COMMIT")
     if commit:
         return commit
-    source_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if not os.path.isdir(os.path.join(source_dir, ".git")):
+    probe = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(4):
+        if os.path.isdir(os.path.join(probe, ".git")):
+            break
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            return "unknown-commit"
+        probe = parent
+    else:
         return "unknown-commit"
     try:
         result = subprocess.run(
@@ -22,7 +31,7 @@ def _resolve_commit():
             capture_output=True,
             text=True,
             timeout=5,
-            cwd=source_dir,
+            cwd=probe,
         )
         return result.stdout.strip() or "unknown-commit"
     except (OSError, subprocess.SubprocessError):
