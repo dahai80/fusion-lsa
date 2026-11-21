@@ -52,22 +52,19 @@ FWE_QUESTION_TEMPLATE = (
 
 
 def _filler_words(rng: random.Random, count: int) -> list[str]:
-    # Distinct neutral English sentences tokenized to words; keeps the
-    # haystack natural without ever beating the coded-word counts.
-    sentences = [
-        "the sun rises over the quiet valley and the farmers begin another day of work",
-        "grass is green in the summer and the rain comes late in the afternoon",
-        "the river carries leaves past the old mill on the edge of town",
-        "children walk to school along the road that crosses the wooden bridge",
-        "the market opens early and the vendors arrange fruit in neat rows",
-        "wind moves through the pines and the air smells of resin and salt",
-        "a gray cat sleeps on the warm stones beside the garden wall",
-        "the clock in the tower strikes seven and the lamps go out one by one",
-    ]
+    # Unique coded filler tokens: each appears exactly once, so the repeated
+    # coded words (counts >= 5) are guaranteed to be the most frequent words.
+    # Natural sentences would let stop words ("the") outnumber the coded words
+    # and make the ground truth wrong.
     words: list[str] = []
+    seen: set[str] = set()
     while len(words) < count:
-        words.extend(rng.choice(sentences).split())
-    return words[:count]
+        token = f"zelvar{rng.randint(100000, 999999)}"
+        if token in seen:
+            continue
+        seen.add(token)
+        words.append(token)
+    return words
 
 
 def build_vt_prompt(target_tokens: int, seed: int, hops: int = 4):
@@ -103,7 +100,6 @@ def build_fwe_prompt(target_tokens: int, seed: int):
             words.insert(rng.randrange(len(words) + 1), word)
     question = FWE_QUESTION_TEMPLATE
     prompt = " ".join(words) + "\n\n" + question
-    expected = ", ".join(coded)  # hit = all three coded words named
     return prompt, coded
 
 
