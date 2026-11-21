@@ -37,6 +37,75 @@ QUESTION_TEMPLATE = (
     "What is the special magic number for {key_word} mentioned in the provided text?"
 )
 
+# --- RULER VT (variable tracking): chained assignments, ask for the tail ---
+VT_CHAIN_TEMPLATE = "VAR_{tag}{i} = {value}. "
+VT_HOP_TEMPLATE = "VAR_{tag}{i} = VAR_{tag}{prev}. "
+VT_QUESTION_TEMPLATE = (
+    "What is the value of VAR_{tag}{n} mentioned in the provided text?"
+)
+
+# --- RULER FWE (frequent words extraction): coded words outnumber fillers ---
+FWE_QUESTION_TEMPLATE = (
+    "What are the 3 most frequent words in the provided text? "
+    "Answer with the 3 words separated by commas."
+)
+
+
+def _filler_words(rng: random.Random, count: int) -> list[str]:
+    # Distinct neutral English sentences tokenized to words; keeps the
+    # haystack natural without ever beating the coded-word counts.
+    sentences = [
+        "the sun rises over the quiet valley and the farmers begin another day of work",
+        "grass is green in the summer and the rain comes late in the afternoon",
+        "the river carries leaves past the old mill on the edge of town",
+        "children walk to school along the road that crosses the wooden bridge",
+        "the market opens early and the vendors arrange fruit in neat rows",
+        "wind moves through the pines and the air smells of resin and salt",
+        "a gray cat sleeps on the warm stones beside the garden wall",
+        "the clock in the tower strikes seven and the lamps go out one by one",
+    ]
+    words: list[str] = []
+    while len(words) < count:
+        words.extend(rng.choice(sentences).split())
+    return words[:count]
+
+
+def build_vt_prompt(target_tokens: int, seed: int, hops: int = 4):
+    rng = random.Random(seed)
+    tag = f"grasveld{rng.randint(1000, 9999)}"
+    value = f"{rng.randint(100000, 999999)}-{rng.randint(100, 999)}"
+    # chain head carries the literal value, hops 2..n copy the previous var;
+    # each element sits at its own depth so the chain spans the context
+    words = _filler_words(rng, target_tokens // 2)
+    total = len(words)
+    for i in range(1, hops + 1):
+        piece = (
+            VT_CHAIN_TEMPLATE.format(tag=tag, i=i, value=value)
+            if i == 1
+            else VT_HOP_TEMPLATE.format(tag=tag, i=i, prev=i - 1)
+        )
+        pos = int(total * i / (hops + 1))
+        words[pos:pos] = piece.split()
+    question = VT_QUESTION_TEMPLATE.format(tag=tag, n=hops)
+    prompt = " ".join(words) + "\n\n" + question
+    return prompt, value
+
+
+def build_fwe_prompt(target_tokens: int, seed: int):
+    rng = random.Random(seed)
+    # 3 coded words with decreasing counts well above any filler word count
+    coded = [f"krovex{rng.randint(100, 999)}" for _ in range(3)]
+    counts = [max(8, target_tokens // 40), max(6, target_tokens // 55), max(5, target_tokens // 80)]
+    filler_count = target_tokens // 2 - sum(counts)
+    words = _filler_words(rng, max(1, filler_count))
+    for word, count in zip(coded, counts):
+        for _ in range(count):
+            words.insert(rng.randrange(len(words) + 1), word)
+    question = FWE_QUESTION_TEMPLATE
+    prompt = " ".join(words) + "\n\n" + question
+    expected = ", ".join(coded)  # hit = all three coded words named
+    return prompt, coded
+
 
 def build_prompt(
     target_tokens: int, seed: int, needle_depth: float = 0.6
@@ -129,15 +198,28 @@ def main() -> None:
         default=0.6,
         help="needle position as fraction of context depth (1.0 = end)",
     )
+    parser.add_argument(
+        "--task",
+        choices=["niah", "vt", "fwe"],
+        default="niah",
+        help="RULER subtask: niah (single needle), vt (variable tracking chain), fwe (frequent words)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     hits = 0
     tps_readings = []
-    prompt, expected = build_prompt(
-        args.length, seed=args.seed, needle_depth=args.needle_depth
-    )
-    logger.info("prompt ~%d tokens, expected value %s", args.length, expected)
+    coded = None
+    if args.task == "vt":
+        prompt, expected = build_vt_prompt(args.length, seed=args.seed)
+    elif args.task == "fwe":
+        prompt, coded = build_fwe_prompt(args.length, seed=args.seed)
+        expected = ", ".join(coded)
+    else:
+        prompt, expected = build_prompt(
+            args.length, seed=args.seed, needle_depth=args.needle_depth
+        )
+    logger.info("task=%s prompt ~%d tokens, expected %s", args.task, args.length, expected)
     probe_lo = -1
     if os.environ.get("RULER_PROBE_TOKENS"):
         from transformers import AutoTokenizer
@@ -153,7 +235,7 @@ def main() -> None:
             text, elapsed, _completion_tokens, decode_tps = run_once(
                 client, args.base_url, args.model, prompt, args.max_tokens, args.api_key
             )
-            hit = expected in text
+            hit = all(word in text for word in coded) if coded else expected in text
             hits += int(hit)
             if decode_tps > 0:
                 tps_readings.append(decode_tps)
