@@ -4,7 +4,7 @@ import subprocess
 
 logger = logging.getLogger(__name__)
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 
 def _resolve_commit():
