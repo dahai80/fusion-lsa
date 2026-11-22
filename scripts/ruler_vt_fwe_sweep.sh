@@ -43,10 +43,14 @@ echo "tier server ready on :${PORT}"
 
 # 2. sweeps: {niah control, vt, fwe, qa, cwe} x {32k, 128k} x seeds 41-43,
 # 512-token budget. One seed per invocation: distinct seeds bypass the
-# server response cache.
-for TASK in niah vt fwe qa cwe; do
-    for LEN in 32000 131072; do
-        for SEED in 41 42 43; do
+# server response cache. TASKS / LENS / SEEDS env vars subset the matrix
+# for resume after an interrupted run.
+TASKS="${TASKS:-niah vt fwe qa cwe}"
+LENS="${LENS:-32000 131072}"
+SEEDS="${SEEDS:-41 42 43}"
+for TASK in ${TASKS}; do
+    for LEN in ${LENS}; do
+        for SEED in ${SEEDS}; do
             "${PY}" scripts/ruler32k_bench.py \
                 --base-url "${BASE_URL}" --model "${MODEL}" \
                 --task "${TASK}" --length "${LEN}" --repeats 1 \
