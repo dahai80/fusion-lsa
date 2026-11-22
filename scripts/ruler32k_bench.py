@@ -349,7 +349,7 @@ def main() -> None:
                 tps_readings.append(decode_tps)
             logger.info(
                 "run %d: hit=%s answer=%r wall=%.1fs decode_tps=%.1f",
-                index, hit, text.strip()[:80], elapsed, decode_tps,
+                index, hit, text.strip()[:500], elapsed, decode_tps,
             )
     summary = {
         "hits": hits,
