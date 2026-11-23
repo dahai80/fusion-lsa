@@ -48,6 +48,7 @@ echo "tier server ready on :${PORT}"
 TASKS="${TASKS:-niah vt fwe qa cwe}"
 LENS="${LENS:-32000 131072}"
 SEEDS="${SEEDS:-41 42 43}"
+MAXTOK="${MAXTOK:-512}"
 for TASK in ${TASKS}; do
     for LEN in ${LENS}; do
         for SEED in ${SEEDS}; do
@@ -55,7 +56,7 @@ for TASK in ${TASKS}; do
                 --base-url "${BASE_URL}" --model "${MODEL}" \
                 --task "${TASK}" --length "${LEN}" --repeats 1 \
                 --seed "${SEED}" \
-                --max-tokens 512 \
+                --max-tokens "${MAXTOK}" \
                 --api-key "${API_KEY}" \
                 2>&1 | tee -a "${OUT_DIR}/ruler-${TASK}-${LEN}-${STAMP}.log"
         done

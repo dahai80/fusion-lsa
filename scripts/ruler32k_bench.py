@@ -67,6 +67,27 @@ def _filler_words(rng: random.Random, count: int) -> list[str]:
     return words
 
 
+def calibrate_prompt(build_fn, target_tokens: int, seed: int, tokenizer):
+    # Synthetic coded fillers tokenize to ~8 tokens per word (vs ~1.3 for
+    # natural text), so the word-level budget overshoots ~4x. Rebuild with
+    # a rescaled target until the measured token count is within 5% of the
+    # requested budget; coded words are drawn before filler sizing, so
+    # ground truth is stable across rescales.
+    target = target_tokens
+    prompt, extra = build_fn(target, seed=seed)
+    ids = tokenizer(prompt, add_special_tokens=False).input_ids
+    for _ in range(2):
+        if abs(len(ids) - target_tokens) <= 0.05 * target_tokens:
+            break
+        target = max(1024, int(target * target_tokens / len(ids)))
+        prompt, extra = build_fn(target, seed=seed)
+        ids = tokenizer(prompt, add_special_tokens=False).input_ids
+    logger.info(
+        "calibrated %s prompt to %d tokens (target %d)", build_fn.__name__, len(ids), target_tokens
+    )
+    return prompt, extra
+
+
 def build_vt_prompt(target_tokens: int, seed: int, hops: int = 4):
     rng = random.Random(seed)
     tag = f"grasveld{rng.randint(1000, 9999)}"
@@ -287,15 +308,20 @@ def main() -> None:
     hits = 0
     tps_readings = []
     coded = None
+    tokenizer = None
+    if args.task != "niah":
+        from transformers import AutoTokenizer
+        tok_dir = os.environ.get("RULER_TOKENIZER_DIR", "models/qwen38-27b")
+        tokenizer = AutoTokenizer.from_pretrained(tok_dir, trust_remote_code=True)
     if args.task == "vt":
-        prompt, expected = build_vt_prompt(args.length, seed=args.seed)
+        prompt, expected = calibrate_prompt(build_vt_prompt, args.length, args.seed, tokenizer)
     elif args.task == "fwe":
-        prompt, coded = build_fwe_prompt(args.length, seed=args.seed)
+        prompt, coded = calibrate_prompt(build_fwe_prompt, args.length, args.seed, tokenizer)
         expected = ", ".join(coded)
     elif args.task == "qa":
-        prompt, expected = build_qa_prompt(args.length, seed=args.seed)
+        prompt, expected = calibrate_prompt(build_qa_prompt, args.length, args.seed, tokenizer)
     elif args.task == "cwe":
-        prompt, coded = build_cwe_prompt(args.length, seed=args.seed)
+        prompt, coded = calibrate_prompt(build_cwe_prompt, args.length, args.seed, tokenizer)
         expected = ", ".join(coded)
     else:
         prompt, expected = build_prompt(
@@ -323,7 +349,7 @@ def main() -> None:
                 tps_readings.append(decode_tps)
             logger.info(
                 "run %d: hit=%s answer=%r wall=%.1fs decode_tps=%.1f",
-                index, hit, text.strip()[:80], elapsed, decode_tps,
+                index, hit, text.strip()[:500], elapsed, decode_tps,
             )
     summary = {
         "hits": hits,
