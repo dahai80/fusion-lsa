@@ -58,18 +58,26 @@ run time. Fetch it once via the HF mirror:
 ```bash
 mkdir -p datasets
 HF_MIRROR=https://hf-mirror.com python - <<'PY'
-import json
-from datasets import load_dataset
-ds = load_dataset("THUDM/LongBench", "narrativeqa", split="test")
-with open("datasets/longbench_qa.jsonl", "w", encoding="utf-8") as f:
-    for row in ds:
-        f.write(json.dumps({
-            "question": row["question"],
+import json, zipfile
+from huggingface_hub import hf_hub_download
+# datasets>=3 refuses script-based repos; pull data.zip from the hub instead
+path = hf_hub_download("THUDM/LongBench", "data.zip", repo_type="dataset")
+with zipfile.ZipFile(path) as z:
+    z.extract("data/narrativeqa.jsonl", ".")
+with open("data/narrativeqa.jsonl", encoding="utf-8") as f, \
+     open("datasets/longbench_qa.jsonl", "w", encoding="utf-8") as w:
+    for line in f:
+        row = json.loads(line)
+        w.write(json.dumps({
+            "question": row["input"],
             "passages": [row["context"]],
-            "answers": json.loads(row["answers"]),
-        }) + "\n")
+            "answers": row["answers"],
+        }, ensure_ascii=False) + "\n")
 PY
+rm -rf data
 ```
+
+This yields 200 narrativeqa records.
 
 Expected JSONL schema, one record per line (records are selected by `--seed`):
 
