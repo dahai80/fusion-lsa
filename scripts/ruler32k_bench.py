@@ -315,6 +315,7 @@ def run_once(
     prompt: str,
     max_tokens: int,
     api_key: str | None = None,
+    repair_pages: int = 0,
 ):
     # Streaming: decode tps = completion tokens between the first and last
     # chunk, excluding prefill wall time. A response served from the server
@@ -326,6 +327,14 @@ def run_once(
         "temperature": 0.0,
         "stream": True,
     }
+    if repair_pages:
+        # Issued only when non-zero: with the flag absent the request body is
+        # byte-identical to the plain bench, keeping the N=0 path bit-equal.
+        # The tier server reads it into the per-step repair quota (issue #12);
+        # servers that predate the flag ignore or reject the field - the
+        # fusion-mlx wiring issue tracks the server-side contract.
+        payload["lsa_repair_pages"] = int(repair_pages)
+        logger.info("repair quota: %d pages per decode step", repair_pages)
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     start = time.monotonic()
     text_parts = []
@@ -387,6 +396,12 @@ def main() -> None:
         default="datasets/longbench_qa.jsonl",
         help="local JSONL for --task longbench_qa; fetch once via the HF mirror, no network at run time",
     )
+    parser.add_argument(
+        "--repair-pages",
+        type=int,
+        default=0,
+        help="per-decode-step repair quota: N extra pages selected by exact q.k over the full page index, unioned with the static tier (0 = pure static tier, bit-identical)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -434,7 +449,8 @@ def main() -> None:
     with httpx.Client() as client:
         for index in range(args.repeats):
             text, elapsed, _completion_tokens, decode_tps = run_once(
-                client, args.base_url, args.model, prompt, args.max_tokens, args.api_key
+                client, args.base_url, args.model, prompt, args.max_tokens, args.api_key,
+                repair_pages=args.repair_pages,
             )
             if args.task == "longbench_qa":
                 hit = qa_substring_hit(text, expected)
@@ -472,6 +488,8 @@ def main() -> None:
             "length": args.length,
             "seed": args.seed,
         }
+    if args.repair_pages:
+        summary["repair_pages"] = args.repair_pages
     print(json.dumps(summary, indent=2))
 
 
