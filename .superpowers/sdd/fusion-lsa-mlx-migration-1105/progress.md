@@ -893,3 +893,111 @@ cool start and today's machine ran a 9.6 h prefill + RULER suite.
 - Quest baseline: on hold (950DT occupied by other team, user confirmed). Not a blocker for paper route per user ruling.
 - Do NOT touch: hsa LaTeX/venue/refs (parallel session owns).
 - User pre-approved 19:33: "如果需要v10，一定要跑，不要等我决策" - Plan B auto-relaunch is now explicit standing authorization, not a default.
+
+## 2026-11-18 num_resources forensics (post-v9r2)
+- Root identity of the 499000 wall: macOS GPU kernel per-process resource cap
+  `iogpu.rsrc_limit` (MLX reads it via sysctlbyname, defaults 499000; not
+  exposed as a tunable sysctl on this macOS build). MLX allocator.cpp denies
+  malloc when num_resources_ (live + cached MTL resources) >= limit.
+- lldb counter reads on live processes (STOP-attach-read-CONT):
+  failed v9r2 server post-cleanup num_resources=2248 (active 53.8GB);
+  idle diagnostic server baseline=4071 (weights only).
+- v9r2 log correction (IMPORTANT): the decode-entry rebuild did NOT die in
+  layer 1 at close 2114. NINE layers completed full rebuilds (2,139 closes
+  each = 19,251 closes) and the TENTH died at close 2113. Same structure in
+  v8 (8x "block 2138 appended" then death). Earlier draft wording "first
+  2,113 closes" is wrong - fix draft + run-logs.
+- Leak arithmetic: ~497k resources accumulated over prefill + ~21.4k closes
+  => ~14.5 resources per prefill layer-chunk, or ~23 per close if all
+  accumulated during rebuild. Resources are LIVE (kernel-counted), invisible
+  to python gc (1,189 arrays at prefill end), to allocator active bytes, and
+  cache bytes were 0.00GB. Freed wholesale on request teardown.
+- Exonerated by probes: fusion-lsa build_buckets/append (+3/close only),
+  selector-level rebuild incl. projection (full 2,139-close sim, clean),
+  TQ dequant rebuild path incl. slice+dequantize+append (clean), MLX
+  __setitem__ scatter (4M iterations, clean), pure alloc churn (clean).
+- Remaining suspects (server-only paths): TQ fused quantize kernels per
+  layer-chunk, prefill attention path (TQ score kernels), per-request
+  scheduler machinery. In-flight: 46K-token live prefill with num_resources
+  sampling to get the per-token slope.
+
+## 2026-11-18 06:xx ROOT CAUSE FOUND + FIXED + v10 LAUNCHED
+- Bisect (numres probe, 4 arms x 400 closes): dequant 0/close, index_keys
+  0/close, append_keys 198.2/close => leak is IncrementalBucketIndex.append.
+- Micro-bisect: build_buckets isolated clean (cpu+gpu), ward clean, pool
+  clean. Discriminator: RETAINED result. retain (store lazy block) = +201/it;
+  retain_eval = +3/it. Mechanism: stored lazy Buckets arrays pin their whole
+  materialized upstream graph - ~203 MTL buffers/close, invisible to gc
+  (python holds 3 arrays), untracked by active-memory (CPU-stream path), not
+  drainable by clear_cache (live graph nodes).
+- Real append path measured: +203 resources/close, +16.6KB active/close.
+- Fix (fusion-lsa 2dc3698, TDD): eval block at close; store as DETACHED host
+  numpy (np.array(np.asarray(x), copy=True) - plain np.asarray/np.array is a
+  zero-copy VIEW pinning the MTL buffer via base). buckets() concats on host
+  then materializes one mx.array per field. Tests: host-storage contract +
+  base-is-None detach contract + buckets-parity from host blocks.
+- Verification: fusion-lsa suite 55 passed/3 skipped; 2,000 consecutive
+  appends numres FLAT (delta 0, active 0.1MB) vs +203/close before.
+- Arithmetic: 2,139 closes/layer x 64 layers = 136,896 closes; old fix-shape
+  (eval only, 3/close) = 410k resources = 82% of cap - host storage required.
+- run-logs.md v9r2 verdict rewritten with final root cause + v10 row added.
+- v10 launched via /tmp/relaunch_1m_v10.sh (sed v5->v10 of relaunch_1m.sh,
+  same flag set). Thermal clean at launch. Watch: bench log + serve log.
+- 07:50 correction (user review catch): "lands exactly on the cap" arithmetic
+  was wrong. 2,139 x 203 + baseline = ~436k != 499k; and if 203/close were
+  retained with zero release, death would be layer 1 at ~2,400 closes, not
+  after 21.4k. Self-consistent reading: serving path releases part of the
+  pinned set (per-chunk clear_cache + implicit evals), residual ~23/close
+  average accumulates monotonically to the cap. Probe 203/close = no-release
+  ceiling case. Draft + run-logs reworded to an accounting bracket; exact
+  release/residual split never sampled live (honest open sub-item).
+- 12:1x v10r2 incident: bench died mid-prefill (~555k/1.1M) with
+  httpx.RemoteProtocolError "peer closed connection"; server never logged
+  disconnect and kept prefilling for the dead socket (memchecks advancing
+  12:10+). v9r2 same script kept the connection 15h under 1800s read
+  timeout, so bytes normally flow during prefill; transient pressure events
+  (level 4 @10:25, sysctl timeout @11:17, normal by 12:12) are suspects but
+  exact cause unsampled. ALSO self-inflicted kill earlier: TaskStop on the
+  launcher background task SIGTERM'd the process group (server "received
+  SIGTERM from unknown ppid=..." 06:37) - never TaskStop a launcher task.
+- Actions: bench read timeout 1800s -> 86400s (fusion-lsa e60ae74);
+  v10r2 killed; v10r3 launched ~12:15 via relaunch_1m_v10.sh (bench pid
+  re-armed, watch task unchanged). r3 = clean third attempt with hardened
+  bench.
+- 15:04 UNPLANNED REBOOT #2 killed v10r3 at 430k/1.1M (39%, zero failure
+  signatures, healthy telemetry). Panic log: "watchdog timeout: no checkins
+  from watchdogd in 90 seconds" - system-wide stall, NOT our process.
+  Same class as the 11-17 12:44 reboot that killed v9. Two midday reboots
+  in two days while a 1M prefill holds 70-85GB phys; v5/v7/v8/v9r2 all
+  completed prefill at up to 107.9GB phys without panic, so the trigger is
+  not simply our footprint - but the runs are the common context. Session
+  restart also killed the watch tasks; /tmp wiped (launcher recreated).
+- v10r4 launched 15:07 (recreate relaunch_1m_v10.sh from hsa source, same
+  flag set + hardened bench e60ae74). Attempt ledger: r1 self-kill
+  (TaskStop killpg), r2 client EOF mystery, r3 kernel panic, r4 running.
+- 17:23 USER GRANT (standing): if v10r4 decode entry (~21:30 CST) fails,
+  fix root cause immediately and auto-launch the next attempt WITHOUT
+  waiting for user decision. Applies to subsequent rounds too until 1M
+  decode-entry rebuild passes or a blocker requires user input.
+
+## 2026-11-19 05:02 v10 PASS - END-TO-END 1M DECODE DEMONSTRATED
+- v10r4 (launched 11-18 15:07 after kernel panic killed r3): prefill
+  1,095,638 tok; decode-entry rebuild ALL 16 layers x 2,139 = 34,224
+  closes, ZERO Resource-limit denials, zero retries (v8/v9r2 died at
+  ~2113 of layer ~10). Final close telemetry: active 79.08GB cache
+  0.00GB peak 88.23GB rss 52.16GB.
+- Decode: needle 126225-859 at depth 1.0 retrieved EXACTLY. accuracy 1.0,
+  decode_tps 1.6 (32 greedy tok), total wall 13h52m (15:09:34 -> 05:01:55).
+- Host-storage fix (2dc3698) verified in production at full scale:
+  counter flat across the entire rebuild vs ~203/close retention before.
+- Docs: run-logs v10 row + verdict (4c61b7b); draft abstract item 5,
+  S5.2 item 3, S5.3, limitations bullet -> demonstrated. G1 fully closed
+  (prefill AND decode on one 128GB Mac).
+- Next: machine cool ~30min, then 128K RULER sweep (last checklist item);
+  teardown server 9424 + watchdog 10546 before sweep.
+
+## 2026-11-19 06:2x - 128K RULER sweep complete, checklist closed
+- Mac LSA tier serving-path sweep (m3_mac_tier_sweep.sh, port 11556, k8v4): 4k 3/3, 32k 3/3, 131072 3/3 - accuracy 1.0 everywhere, decode tps 1.6-2.1. Fresh-prefill walls: 4k ~25s, 32k 126s, 128k 878.6s (repeats 2-3 partly server-response-cache; noted in results JSON caveat).
+- Two driver bugs fixed en route: (1) ran .sh with python (SyntaxError) - use bash; (2) sweep script missing --api-key (401), fixed in hsa, failed log archived as m3-mac-tier-sweep-401fail.log.
+- Artifacts: results/m3_mac_tier_sweep.json (committed), run-logs.md new section, raw log ~/.fusion-mlx/logs/m3-mac-tier-sweep.log.
+- Checklist from 11-17 plan now fully closed: G1 (1M end-to-end) v10 PASS + serving-path sweep green.
