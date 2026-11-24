@@ -21,6 +21,7 @@ import os
 import random
 import statistics
 import time
+from collections import Counter
 
 import httpx
 
@@ -228,6 +229,85 @@ def build_prompt(
     return prompt, value
 
 
+# --- LongBench QA: real-text passages + question, local JSONL only ---
+# Dataset file (datasets/longbench_qa.jsonl, gitignored) is fetched once by
+# the user via the HF mirror - no network access at run time. Schema per
+# line: {"question": str, "passages": [str], "answers": [str]}.
+
+import re
+import string
+
+
+def _normalize_answer(text: str) -> str:
+    # LongBench QA normalization: lowercase, strip punctuation, drop
+    # articles, collapse whitespace.
+    text = text.lower()
+    text = "".join(ch if ch not in string.punctuation else " " for ch in text)
+    text = re.sub(r"\b(a|an|the)\b", " ", text)
+    return " ".join(text.split())
+
+
+def _f1_score(prediction: str, ground_truth: str) -> float:
+    pred_tokens = _normalize_answer(prediction).split()
+    gt_tokens = _normalize_answer(ground_truth).split()
+    if not pred_tokens or not gt_tokens:
+        return float(pred_tokens == gt_tokens)
+    common = Counter(pred_tokens) & Counter(gt_tokens)
+    overlap = sum(common.values())
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(pred_tokens)
+    recall = overlap / len(gt_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
+def qa_f1(prediction: str, answers: list[str]) -> float:
+    return max((_f1_score(prediction, answer) for answer in answers), default=0.0)
+
+
+def qa_substring_hit(prediction: str, answers: list[str]) -> bool:
+    # LongBench substring convention on normalized text: the gold answer
+    # appears in the prediction after normalization.
+    pred = _normalize_answer(prediction)
+    return any(_normalize_answer(answer) in pred for answer in answers)
+
+
+def load_longbench_records(path: str) -> list[dict]:
+    records = []
+    with open(path, encoding="utf-8") as handle:
+        for line_no, line in enumerate(handle, 1):
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            missing = {"question", "passages", "answers"} - set(record)
+            if missing:
+                raise ValueError(f"{path}:{line_no} missing keys {sorted(missing)}")
+            records.append(record)
+    if not records:
+        raise ValueError(f"{path} holds no records")
+    logger.info("loaded %d longbench_qa records from %s", len(records), path)
+    return records
+
+
+def build_longbench_qa_prompt(record: dict, target_tokens: int, seed: int) -> tuple[str, list[str]]:
+    # Real-text passages joined and cycled/truncated to the word budget, the
+    # question at the end. Passage order is controlled by the seed (fixed
+    # order per seed, deterministic across runs).
+    rng = random.Random(seed)
+    passages = list(record["passages"])
+    rng.shuffle(passages)
+    words: list[str] = []
+    cycle = 0
+    while len(words) < target_tokens // 1.3 and cycle < 1000:
+        words.extend(passages[cycle % len(passages)].split())
+        cycle += 1
+    words = words[: int(target_tokens // 1.3)]
+    context = " ".join(words)
+    prompt = context + "\n\n" + record["question"]
+    return prompt, list(record["answers"])
+
+
 def run_once(
     client: httpx.Client,
     base_url: str,
@@ -298,15 +378,21 @@ def main() -> None:
     )
     parser.add_argument(
         "--task",
-        choices=["niah", "vt", "fwe", "qa", "cwe"],
+        choices=["niah", "vt", "fwe", "qa", "cwe", "longbench_qa"],
         default="niah",
-        help="RULER subtask: niah (single needle), vt (variable tracking chain), fwe (frequent words), qa (fact-bearing passage among distractors), cwe (common words)",
+        help="RULER subtask: niah (single needle), vt (variable tracking chain), fwe (frequent words), qa (fact-bearing passage among distractors), cwe (common words), longbench_qa (real-text passages from a local JSONL)",
+    )
+    parser.add_argument(
+        "--longbench-file",
+        default="datasets/longbench_qa.jsonl",
+        help="local JSONL for --task longbench_qa; fetch once via the HF mirror, no network at run time",
     )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     hits = 0
     tps_readings = []
+    f1_readings = []
     coded = None
     tokenizer = None
     if args.task != "niah":
@@ -323,6 +409,13 @@ def main() -> None:
     elif args.task == "cwe":
         prompt, coded = calibrate_prompt(build_cwe_prompt, args.length, args.seed, tokenizer)
         expected = ", ".join(coded)
+    elif args.task == "longbench_qa":
+        records = load_longbench_records(args.longbench_file)
+        record = records[args.seed % len(records)]
+        prompt, expected = calibrate_prompt(
+            lambda target, seed: build_longbench_qa_prompt(record, target, seed),
+            args.length, args.seed, tokenizer,
+        )
     else:
         prompt, expected = build_prompt(
             args.length, seed=args.seed, needle_depth=args.needle_depth
@@ -343,7 +436,11 @@ def main() -> None:
             text, elapsed, _completion_tokens, decode_tps = run_once(
                 client, args.base_url, args.model, prompt, args.max_tokens, args.api_key
             )
-            hit = all(word in text for word in coded) if coded else expected in text
+            if args.task == "longbench_qa":
+                hit = qa_substring_hit(text, expected)
+                f1_readings.append(qa_f1(text, expected))
+            else:
+                hit = all(word in text for word in coded) if coded else expected in text
             hits += int(hit)
             if decode_tps > 0:
                 tps_readings.append(decode_tps)
@@ -351,14 +448,30 @@ def main() -> None:
                 "run %d: hit=%s answer=%r wall=%.1fs decode_tps=%.1f",
                 index, hit, text.strip()[:500], elapsed, decode_tps,
             )
-    summary = {
-        "hits": hits,
-        "repeats": args.repeats,
-        "accuracy": hits / args.repeats,
-        "mean_decode_tps": statistics.mean(tps_readings) if tps_readings else 0.0,
-        "length": args.length,
-        "seed": args.seed,
-    }
+    if args.task == "longbench_qa":
+        # Score distribution replaces hits/total semantics for real-text QA:
+        # token-level F1 (LongBench convention, max over gold answers) plus
+        # the normalized-substring hit count.
+        summary = {
+            "task": "longbench_qa",
+            "repeats": args.repeats,
+            "substring_hits": hits,
+            "substring_accuracy": hits / args.repeats,
+            "mean_f1": statistics.mean(f1_readings) if f1_readings else 0.0,
+            "f1_scores": f1_readings,
+            "mean_decode_tps": statistics.mean(tps_readings) if tps_readings else 0.0,
+            "length": args.length,
+            "seed": args.seed,
+        }
+    else:
+        summary = {
+            "hits": hits,
+            "repeats": args.repeats,
+            "accuracy": hits / args.repeats,
+            "mean_decode_tps": statistics.mean(tps_readings) if tps_readings else 0.0,
+            "length": args.length,
+            "seed": args.seed,
+        }
     print(json.dumps(summary, indent=2))
 
 

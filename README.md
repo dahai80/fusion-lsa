@@ -48,6 +48,42 @@ python -m pytest tests/
 Parity tests read the upstream oracle from `~/model/latent-sparse-attention/src`
 (override with `LSA_UPSTREAM`); they skip when it is absent.
 
+## LongBench QA task (real-text eval)
+
+`scripts/ruler32k_bench.py --task longbench_qa` runs a real-text QA task
+against the same server as the synthetic RULER tasks. The dataset is a local
+JSONL file (`datasets/longbench_qa.jsonl`, gitignored) — no network access at
+run time. Fetch it once via the HF mirror:
+
+```bash
+mkdir -p datasets
+HF_MIRROR=https://hf-mirror.com python - <<'PY'
+import json
+from datasets import load_dataset
+ds = load_dataset("THUDM/LongBench", "narrativeqa", split="test")
+with open("datasets/longbench_qa.jsonl", "w", encoding="utf-8") as f:
+    for row in ds:
+        f.write(json.dumps({
+            "question": row["question"],
+            "passages": [row["context"]],
+            "answers": json.loads(row["answers"]),
+        }) + "\n")
+PY
+```
+
+Expected JSONL schema, one record per line (records are selected by `--seed`):
+
+```json
+{"question": "...", "passages": ["...", "..."], "answers": ["gold1", "gold2"]}
+```
+
+Scoring follows the LongBench convention: token-level F1 (normalized,
+max over gold answers) plus normalized-substring hits; the summary JSON
+reports `mean_f1`, `f1_scores`, and `substring_hits` instead of the
+synthetic tasks' `hits/total`. Prompt length control matches the synthetic
+tasks: passages are cycled/truncated to the token budget with the question
+at the end, passage order fixed by the seed.
+
 ## Hard boundaries
 
 - This repo is the semantics SSOT for the LSA index (ward merge, incremental
