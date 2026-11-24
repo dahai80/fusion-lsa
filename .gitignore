@@ -24,3 +24,4 @@ build/
 
 # Runtime model assets (downloaded from upstream releases)
 models/
+datasets/
