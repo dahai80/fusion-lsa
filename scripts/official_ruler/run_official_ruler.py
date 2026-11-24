@@ -10,7 +10,12 @@ fusion-lsa results schema (see map_results.py).
 Usage:
   python scripts/official_ruler/run_official_ruler.py \
       --ruler-repo ~/work/RULER --base-url http://localhost:11555/v1 \
-      --model qwen38-27b --length 32000 --tasks niah,vt,fwe
+      --length 32000 --tasks niah,vt,fwe
+
+The pinned pipeline is data/prepare.py -> pred/call_api.py ->
+eval/evaluate.py, all run with cwd=<RULER>/scripts. The pinned call_api
+imports nemo's manifest_utils; a faithful shim lives in ruler_compat/ and is
+injected via PYTHONPATH so the full nemo_toolkit install is not required.
 
 Dry-run (prints the exact commands, runs nothing - covered by the smoke
 test):
@@ -28,7 +33,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from map_results import (  # noqa: E402
+from map_results import (
     PINNED_RULER_COMMIT,
     map_prediction_records,
     read_prediction_jsonl,
@@ -47,11 +52,24 @@ logger = logging.getLogger(__name__)
 # - Tokenizer: the official harness uses its tokenizer path config; we point
 #   it at the served model's tokenizer directory (RULER_TOKENIZER_DIR
 #   convention from our bench).
-DATA_GEN_ARGS = {
-    "niah": ["--task", "niah_single_1"],
-    "vt": ["--task", "vt"],
-    "fwe": ["--task", "fwe"],
+# Our task labels -> task names in the pinned scripts/synthetic.yaml
+# (data/prepare.py resolves generators through that file).
+TASK_TO_YAML = {
+    "niah": "niah_single_1",
+    "vt": "vt",
+    "fwe": "fwe",
+    "cwe": "cwe",
+    "qa": "qa_1",
 }
+
+# The pinned pred/call_api.py OpenAI client requires --model_name_or_path to
+# be a key of its hardcoded model2length table (KeyError otherwise); it uses
+# that value only for token accounting and as the `model` field of the chat
+# request. The fusion-mlx tier server serves whatever is loaded and ignores
+# the field, so we default to the 128000-entry key and never truncate.
+DEFAULT_API_MODEL = "gpt-4-0125-preview"
+
+COMPAT_DIR = Path(__file__).resolve().parent / "ruler_compat"
 
 
 def verify_pinned_commit(repo: Path, allow_any_commit: bool = False) -> str:
@@ -69,47 +87,79 @@ def verify_pinned_commit(repo: Path, allow_any_commit: bool = False) -> str:
     return commit
 
 
-def build_commands(repo: Path, base_url: str, model: str, length: int, seed: int,
-                   tasks: list[str], max_tokens: int, tokenizer_dir: str) -> list[dict]:
-    # The exact subprocess plan, in order. Pure function: the dry-run smoke
-    # test asserts on this without executing anything.
-    data_dir = repo / "data" / f"ruler_{length}_{seed}"
-    pred_dir = repo / "results" / f"ruler_{length}_{seed}"
+def build_commands(repo: Path, base_url: str, length: int, seed: int, tasks: list[str],
+                   tokenizer_dir: str, num_samples: int = 500,
+                   api_model: str = DEFAULT_API_MODEL, template: str = "base") -> list[dict]:
+    # The exact subprocess plan, in order, matching the pinned layout: per
+    # task a data/prepare.py step then a pred/call_api.py step, and one
+    # eval/evaluate.py over all predictions at the end. All three scripts
+    # require cwd=<RULER>/scripts (they import data.<benchmark>.constants and
+    # use relative yaml paths). Pure function: the dry-run smoke test asserts
+    # on this without executing anything.
+    scripts_dir = repo / "scripts"
+    data_dir = scripts_dir / "benchmark_root" / f"ruler_{length}_{seed}" / "data"
+    pred_dir = scripts_dir / "benchmark_root" / f"ruler_{length}_{seed}" / "pred"
     env = {
         "OPENAI_API_BASE": base_url,
+        "OPENAI_BASE_URL": base_url,
         "OPENAI_API_KEY": os.environ.get("FUSION_LSA_BENCH_KEY", "dummy"),
-        "MODEL_NAME": model,
-        "TOKENIZER_PATH": tokenizer_dir,
         "HF_MIRROR": "https://hf-mirror.com",
+        "PYTHONPATH": str(COMPAT_DIR) + os.pathsep + os.environ.get("PYTHONPATH", ""),
     }
     plan = []
     for task in tasks:
-        if task not in DATA_GEN_ARGS:
-            raise SystemExit(f"task {task} not wired (wired: {sorted(DATA_GEN_ARGS)})")
+        if task not in TASK_TO_YAML:
+            raise SystemExit(f"task {task} not wired (wired: {sorted(TASK_TO_YAML)})")
+        yaml_task = TASK_TO_YAML[task]
         plan.append({
             "desc": f"generate {task} data at length {length}",
-            "argv": [sys.executable, str(repo / "scripts" / "data" / "synthetic.py"),
-                     "--length", str(length), "--seed", str(seed)] + DATA_GEN_ARGS[task],
+            "argv": [sys.executable, "data/prepare.py",
+                     "--save_dir", str(data_dir),
+                     "--benchmark", "synthetic",
+                     "--task", yaml_task,
+                     "--tokenizer_path", tokenizer_dir,
+                     "--tokenizer_type", "hf",
+                     "--max_seq_length", str(length),
+                     "--model_template_type", template,
+                     "--num_samples", str(num_samples),
+                     "--random_seed", str(seed)],
             "env": env,
+            "cwd": str(scripts_dir),
+        })
+        plan.append({
+            "desc": f"predict {task} against {base_url}",
+            "argv": [sys.executable, "pred/call_api.py",
+                     "--data_dir", str(data_dir),
+                     "--save_dir", str(pred_dir),
+                     "--benchmark", "synthetic",
+                     "--task", yaml_task,
+                     "--server_type", "openai",
+                     "--model_name_or_path", api_model,
+                     "--temperature", "0",
+                     "--top_p", "1.0"],
+            "env": env,
+            "cwd": str(scripts_dir),
         })
     plan.append({
-        "desc": f"run official RULER eval for {','.join(tasks)} against {base_url}",
-        "argv": [sys.executable, str(repo / "scripts" / "eval.py"),
-                 "--data-dir", str(data_dir), "--output-dir", str(pred_dir),
-                 "--max-tokens", str(max_tokens)],
+        "desc": f"run official RULER eval for {','.join(tasks)}",
+        "argv": [sys.executable, "eval/evaluate.py",
+                 "--data_dir", str(pred_dir),
+                 "--benchmark", "synthetic"],
         "env": env,
+        "cwd": str(scripts_dir),
     })
     return plan
 
 
 def collect_and_map(repo: Path, length: int, seed: int, tasks: list[str], output_dir: Path) -> list[dict]:
     results = []
-    pred_dir = repo / "results" / f"ruler_{length}_{seed}"
+    pred_dir = repo / "scripts" / "benchmark_root" / f"ruler_{length}_{seed}" / "pred"
     for task in tasks:
-        matches = sorted(pred_dir.glob(f"*{task}*.jsonl"))
-        if not matches:
-            raise SystemExit(f"no prediction jsonl for task {task} under {pred_dir}")
-        records = read_prediction_jsonl(matches[-1])
+        yaml_task = TASK_TO_YAML[task]
+        pred_file = pred_dir / f"{yaml_task}.jsonl"
+        if not pred_file.exists():
+            raise SystemExit(f"no prediction jsonl for task {task} at {pred_file}")
+        records = read_prediction_jsonl(pred_file)
         results.append(map_prediction_records(records, task, length))
     write_mapped_results(results, output_dir)
     return results
@@ -136,11 +186,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ruler-repo", required=True, help="clone of NVIDIA/RULER at the pinned commit")
     parser.add_argument("--base-url", default="http://localhost:11555/v1")
-    parser.add_argument("--model", default="qwen38-27b")
     parser.add_argument("--length", type=int, default=32000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--tasks", default="niah,vt,fwe")
-    parser.add_argument("--max-tokens", type=int, default=512)
+    parser.add_argument("--num-samples", type=int, default=500,
+                        help="samples per task; the official default is 500")
+    parser.add_argument("--api-model-name", default=DEFAULT_API_MODEL,
+                        help="model string sent to the server; must be a key of the "
+                             "pinned call_api.py model2length table (default fits it)")
     parser.add_argument("--tokenizer-dir", default=os.environ.get("RULER_TOKENIZER_DIR", "models/qwen38-27b"))
     parser.add_argument("--output-dir", default="results/official-ruler")
     parser.add_argument("--serve-cmd", default=None,
@@ -156,18 +209,20 @@ def main() -> None:
     verify_pinned_commit(repo, args.allow_any_commit)
     if not args.dry_run:
         verify_server(args.base_url)
-    plan = build_commands(repo, args.base_url, args.model, args.length, args.seed,
-                          tasks, args.max_tokens, args.tokenizer_dir)
+    plan = build_commands(repo, args.base_url, args.length, args.seed, tasks,
+                          args.tokenizer_dir, num_samples=args.num_samples,
+                          api_model=args.api_model_name)
     if args.dry_run:
         for step in plan:
-            logger.info("DRY-RUN %s:\n  env %s\n  %s", step["desc"], step["env"], " ".join(step["argv"]))
+            logger.info("DRY-RUN %s:\n  cwd %s\n  env %s\n  %s",
+                        step["desc"], step["cwd"], step["env"], " ".join(step["argv"]))
         return
     if args.serve_cmd:
         logger.info("booting tier server: %s", args.serve_cmd)
         subprocess.run(args.serve_cmd, shell=True, check=True)
     for step in plan:
         logger.info("running: %s", step["desc"])
-        subprocess.run(step["argv"], env={**os.environ, **step["env"]}, check=True)
+        subprocess.run(step["argv"], cwd=step["cwd"], env={**os.environ, **step["env"]}, check=True)
     collect_and_map(repo, args.length, args.seed, tasks, Path(args.output_dir))
 
 

@@ -10,13 +10,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "official_ruler"))
 
-from map_results import (  # noqa: E402
+from map_results import (
     PINNED_RULER_COMMIT,
     map_prediction_records,
     read_prediction_jsonl,
     write_mapped_results,
 )
-from run_official_ruler import build_commands, verify_server  # noqa: E402
+from run_official_ruler import build_commands, verify_server
 
 logger = logging.getLogger(__name__)
 
@@ -67,29 +67,69 @@ def test_write_mapped_results_schema(tmp_path):
     assert payload["mean_accuracy"] == 1.0
 
 
-def test_build_commands_wires_tier_server_env():
+def test_build_commands_wires_pinned_pipeline():
     from pathlib import Path as P
 
     plan = build_commands(
-        P("/tmp/RULER"), "http://localhost:11555/v1", "qwen38-27b", 32000, 42,
-        ["niah", "vt", "fwe"], 512, "models/qwen38-27b",
+        P("/tmp/RULER"), "http://localhost:11555/v1", 32000, 42,
+        ["niah", "vt", "fwe"], "models/qwen38-27b", num_samples=50,
     )
-    assert len(plan) == 4, "one data-gen per task + one eval step"
+    assert len(plan) == 7, "prepare + call_api per task, then one evaluate"
     for step in plan:
+        assert step["cwd"] == "/tmp/RULER/scripts", "pinned scripts need cwd=<RULER>/scripts"
         assert step["env"]["OPENAI_API_BASE"] == "http://localhost:11555/v1"
-        assert step["env"]["MODEL_NAME"] == "qwen38-27b"
+        assert step["env"]["OPENAI_BASE_URL"] == "http://localhost:11555/v1"
         assert step["env"]["HF_MIRROR"] == "https://hf-mirror.com"
-    assert plan[-1]["argv"][-1] == "512", "eval must receive --max-tokens 512"
+        assert "ruler_compat" in step["env"]["PYTHONPATH"], "nemo shim must be on PYTHONPATH"
+    prepare = plan[0]["argv"]
+    assert prepare[1:3] == ["data/prepare.py", "--save_dir"]
+    assert "--task" in prepare and prepare[prepare.index("--task") + 1] == "niah_single_1"
+    assert "--tokenizer_type" in prepare and prepare[prepare.index("--tokenizer_type") + 1] == "hf"
+    assert "--num_samples" in prepare and prepare[prepare.index("--num_samples") + 1] == "50"
+    call = plan[1]["argv"]
+    assert call[1] == "pred/call_api.py"
+    assert call[call.index("--server_type") + 1] == "openai"
+    assert call[call.index("--temperature") + 1] == "0", "greedy decoding matches our bench"
+    assert plan[-1]["argv"][1:3] == ["eval/evaluate.py", "--data_dir"]
+    assert plan[-1]["argv"][3] .endswith("pred")
     with pytest.raises(SystemExit):
         build_commands(
-            P("/tmp/RULER"), "http://localhost:11555/v1", "m", 32000, 42, ["qa"], 512, "tok"
+            P("/tmp/RULER"), "http://localhost:11555/v1", 32000, 42, ["nope"], "tok"
         )
+
+
+def test_emitted_paths_exist_in_pinned_checkout():
+    # Regression for issue #17: every script path the adapter emits must
+    # exist at the pinned commit. Skips when no pinned clone is present.
+    repo = Path.home() / "work" / "RULER"
+    if not (repo / "scripts" / "data" / "prepare.py").exists():
+        pytest.skip("no pinned RULER checkout at ~/work/RULER")
+    plan = build_commands(
+        repo, "http://localhost:11555/v1", 32000, 42, ["niah", "vt", "fwe", "qa"], "tok",
+    )
+    for step in plan:
+        script = Path(step["cwd"]) / step["argv"][1]
+        assert script.exists(), f"emitted script missing at pin: {script}"
+
+
+def test_nemo_shim_manifest_roundtrip(tmp_path):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "official_ruler" / "ruler_compat"))
+    try:
+        from nemo.collections.asr.parts.utils.manifest_utils import read_manifest, write_manifest
+    finally:
+        sys.path.pop(0)
+    path = tmp_path / "m.jsonl"
+    write_manifest(path, [{"index": 0, "input": "a"}, {"index": 1, "input": "b"}])
+    assert read_manifest(path) == [{"index": 0, "input": "a"}, {"index": 1, "input": "b"}]
+    path.write_text('{"index": 2}\nnot json\n\n')
+    assert read_manifest(path) == [{"index": 2}]
+    assert read_manifest(path, fields=["index"]) == [{"index": 2}]
 
 
 class _MockTierHandler(BaseHTTPRequestHandler):
     # Minimal OpenAI-compatible /models surface for the smoke test.
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):
         if self.path.endswith("/models"):
             body = json.dumps({"data": [{"id": "qwen38-27b"}]}).encode()
             self.send_response(200)
@@ -128,7 +168,7 @@ def test_adapter_module_dry_run_smoke():
     # only pin that the script parses and exposes --dry-run.
     script = Path(__file__).resolve().parent.parent / "scripts" / "official_ruler" / "run_official_ruler.py"
     result = subprocess.run(
-        [sys.executable, str(script), "--help"], capture_output=True, text=True
+        [sys.executable, str(script), "--help"], capture_output=True, text=True, check=True
     )
     assert result.returncode == 0
     assert "--dry-run" in result.stdout
