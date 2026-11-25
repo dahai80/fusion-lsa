@@ -49,6 +49,34 @@ def test_map_accepts_official_field_variants():
         map_prediction_records([], "niah", 32000)
 
 
+def test_map_pinned_pred_record_reads_outputs_field():
+    # Issue #20: pinned pipeline pred records carry the gold answer in the
+    # `outputs` list (call_api.py copies it from the data jsonl); the mapper
+    # must score from it without a data-jsonl merge.
+    record = {
+        "index": 0, "input": "ctx", "length": 32000, "others": {},
+        "outputs": ["9275605"], "pred": "The magic number is 9275605.", "truncation": None,
+    }
+    result = map_prediction_records([record], "niah", 32000)
+    assert result["hits"] == 1.0
+    assert result["accuracy"] == 1.0
+    assert result["details"][0]["golden"] == ["9275605"]
+
+
+def test_map_outputs_case_insensitive_and_stringified_list():
+    record = {"pred": "  ANSWER:\x00 nine two seven five  ", "outputs": "['Nine Two Seven Five']"}
+    result = map_prediction_records([record], "vt", 32000)
+    assert result["hits"] == 1.0, "control chars must fold and match must be case-insensitive"
+
+
+def test_map_all_mode_fractional_vs_qa_any_ref():
+    record = {"pred": "alpha beta", "outputs": ["alpha", "gamma"]}
+    assert map_prediction_records([record], "fwe", 32000)["accuracy"] == 0.5, \
+        "string_match_all: per-record score is the contained fraction"
+    assert map_prediction_records([record], "qa", 32000)["accuracy"] == 1.0, \
+        "string_match_part (qa): any ref counts as a full hit"
+
+
 def test_read_prediction_jsonl_rejects_bad_lines(tmp_path):
     path = tmp_path / "pred.jsonl"
     path.write_text('{"pred": "a", "golden": "a"}\nnot json\n')
