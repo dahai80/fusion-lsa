@@ -127,10 +127,19 @@ def test_nemo_shim_manifest_roundtrip(tmp_path):
 
 
 class _MockTierHandler(BaseHTTPRequestHandler):
-    # Minimal OpenAI-compatible /models surface for the smoke test.
+    # Minimal OpenAI-compatible /models surface for the smoke test. When
+    # server.required_key is set, /models 401s without a matching Bearer
+    # header (issue #18: key-required tier servers).
 
     def do_GET(self):
         if self.path.endswith("/models"):
+            required_key = getattr(self.server, "required_key", None)
+            if required_key is not None:
+                auth = self.headers.get("Authorization", "")
+                if auth != "Bearer " + required_key:
+                    self.send_response(401)
+                    self.end_headers()
+                    return
             body = json.dumps({"data": [{"id": "qwen38-27b"}]}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -155,6 +164,25 @@ def test_smoke_adapter_against_mock_tier_server():
         assert payload["data"][0]["id"] == "qwen38-27b"
         with pytest.raises(SystemExit, match="not serving"):
             verify_server("http://127.0.0.1:1/v1")
+    finally:
+        server.shutdown()
+
+
+def test_verify_server_sends_bearer_key(monkeypatch):
+    # Issue #18: the /models probe must authenticate on key-required tier
+    # servers using FUSION_LSA_BENCH_KEY, same as the RULER subprocesses.
+    monkeypatch.setenv("FUSION_LSA_BENCH_KEY", "secret-bench-key")
+    server = HTTPServer(("127.0.0.1", 0), _MockTierHandler)
+    server.required_key = "secret-bench-key"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}/v1"
+        payload = verify_server(base_url)
+        assert payload["data"][0]["id"] == "qwen38-27b"
+        monkeypatch.delenv("FUSION_LSA_BENCH_KEY")
+        with pytest.raises(SystemExit, match="401"):
+            verify_server(base_url)
     finally:
         server.shutdown()
 
