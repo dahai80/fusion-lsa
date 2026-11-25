@@ -11,8 +11,10 @@ are directly comparable, and writes the mapped JSON under
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -24,6 +26,20 @@ logger = logging.getLogger(__name__)
 PRED_FIELDS = ("pred", "prediction", "output", "response")
 GOLD_FIELDS = ("golden", "answer", "gold", "label")
 
+# The pinned pipeline (db43f92ff634) stores the gold answer in the pred jsonl
+# record under `outputs` (call_api.py copies data_point["outputs"] verbatim,
+# and eval/evaluate.py reads references from that same field), so no merge
+# with the data jsonl is needed. `outputs` is a list of gold strings
+# (stringified lists tolerated); `others` is empty at this pin.
+GOLD_LIST_FIELD = "outputs"
+
+# Official scoring per task family, scripts/eval/synthetic/constants.py at the
+# pin: string_match_all for niah/vt/cwe/fwe (EVERY ref must be contained in
+# the prediction; per-record score is the contained fraction), string_match_part
+# for qa (ANY ref). All containment is case-insensitive after postprocess_pred
+# (strip + control chars folded to newline).
+MATCH_MODE_BY_TASK = {"niah": "all", "vt": "all", "fwe": "all", "cwe": "all", "qa": "part"}
+
 
 def _pick(record: dict, fields: tuple[str, ...], what: str, line_no: int) -> str:
     for field in fields:
@@ -33,18 +49,69 @@ def _pick(record: dict, fields: tuple[str, ...], what: str, line_no: int) -> str
     raise ValueError(f"line {line_no}: no {what} field (looked for {fields})")
 
 
+def _normalize_refs(value) -> list[str]:
+    # Accept a list of gold strings, a single string, or a stringified list
+    # ("['9275605']") as written by some data generators. None elements are
+    # dropped (official eval skips them the same way).
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                value = ast.literal_eval(text)
+            except (ValueError, SyntaxError):
+                return [text]
+        else:
+            return [text]
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if item is not None]
+    return [str(value)]
+
+
+def _gold_refs(record: dict, line_no: int) -> list[str]:
+    if GOLD_LIST_FIELD in record and record[GOLD_LIST_FIELD] is not None:
+        refs = _normalize_refs(record[GOLD_LIST_FIELD])
+        if refs:
+            return refs
+    for field in GOLD_FIELDS:
+        if field in record and record[field] is not None:
+            return _normalize_refs(record[field])
+    raise ValueError(
+        f"line {line_no}: no golden answer field (looked for {GOLD_FIELDS + (GOLD_LIST_FIELD,)})"
+    )
+
+
+def _postprocess_pred(predict_str: str) -> str:
+    # Mirror of the pinned eval/evaluate.py postprocess_pred: strip, fold
+    # non-printable characters to newline, strip again.
+    predict_str = predict_str.strip()
+    predict_str = re.compile(r"[\x00-\x1f]").sub("\n", predict_str).strip()
+    return predict_str
+
+
 def map_prediction_records(records: list[dict], task: str, length: int) -> dict:
-    # One RULER per-example jsonl -> our summary schema. Substring scoring
-    # mirrors the official RULER niah/vt/fwe/qa/cwe evaluators (they all
-    # score containment of the golden string in the prediction).
-    hits = 0
+    # One RULER per-example jsonl -> our summary schema. Scoring mirrors the
+    # pinned official evaluators: case-insensitive containment, all-refs for
+    # niah/vt/fwe/cwe, any-ref for qa. `hits` accumulates the per-record
+    # score (fraction of contained refs for all-mode), so accuracy matches
+    # the official summary.csv exactly for single-ref tasks.
+    mode = MATCH_MODE_BY_TASK.get(task, "all")
+    hits = 0.0
     details = []
     for line_no, record in enumerate(records, 1):
-        pred = _pick(record, PRED_FIELDS, "prediction", line_no)
-        gold = _pick(record, GOLD_FIELDS, "golden answer", line_no)
-        hit = gold in pred
-        hits += int(hit)
-        details.append({"hit": hit, "pred": pred[:500], "golden": gold[:200]})
+        pred = _postprocess_pred(_pick(record, PRED_FIELDS, "prediction", line_no))
+        refs = _gold_refs(record, line_no)
+        contained = [1.0 if ref.lower() in pred.lower() else 0.0 for ref in refs]
+        if mode == "part":
+            score = max(contained)
+        else:
+            score = sum(contained) / len(contained)
+        hits += score
+        details.append({
+            "hit": score == 1.0,
+            "score": score,
+            "pred": pred[:500],
+            "golden": refs,
+        })
     if not records:
         raise ValueError("no prediction records to map")
     return {
