@@ -173,8 +173,15 @@ def verify_server(base_url: str) -> dict:
     import urllib.request
 
     url = base_url.rstrip("/") + "/models"
+    # Key-required tier servers 401 the bare probe while the RULER
+    # subprocesses later authenticate via OPENAI_API_KEY (issue #18).
+    headers = {}
+    api_key = os.environ.get("FUSION_LSA_BENCH_KEY")
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    request = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(url, timeout=10) as response:
+        with urllib.request.urlopen(request, timeout=10) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise SystemExit(f"tier server at {base_url} is not serving /models: {exc}") from exc
