@@ -125,7 +125,7 @@ def test_per_chunk_topk_merge_equals_single_chunk_exact_topk():
     for ci, start in enumerate(starts):
         local = scores[start : start + chunk]
         for pos in np.argsort(-local)[: top_k // len(starts)]:
-            merged.append(starts[ci] + pos)  # idxs = ci[pos]: offset-map back
+            merged.append(start + pos)  # idxs = ci[pos]: offset-map back
     merged = sorted(merged)
     # Whole-sequence top-k is the upper bound of any per-chunk merge at a
     # smaller total budget, and every merged row must be a row the global

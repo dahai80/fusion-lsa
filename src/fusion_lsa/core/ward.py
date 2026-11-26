@@ -37,8 +37,6 @@ def ward_rounds(
     parent = mx.broadcast_to(mx.arange(pools), (blocks, pools))
     index = mx.broadcast_to(mx.arange(pools), (blocks, pools))
     diagonal = mx.eye(pools, dtype=mx.bool_)
-    rows = mx.arange(blocks)[:, None]
-    cols = mx.arange(pools)[None, :]
     merges_done = 0
     for _ in range(max_rounds):
         merges_left = alive.sum(axis=1) - bucket_count

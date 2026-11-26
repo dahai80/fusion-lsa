@@ -10,19 +10,19 @@ logger = logging.getLogger(__name__)
 
 # Defaults follow the upstream served flat config: block 512, pool 4, bucket 8, cap 16,
 # top_k 2048, top_p 512, window 512, sink 4
-DEFAULTS = dict(
-    total=131072,
-    index_dim=64,
-    block_size=512,
-    pool_size=4,
-    bucket_size=8,
-    bucket_cap=16,
-    top_k=2048,
-    top_p=512,
-    window=512,
-    sink=4,
-    decode_queries=64,
-)
+DEFAULTS = {
+    "total": 131072,
+    "index_dim": 64,
+    "block_size": 512,
+    "pool_size": 4,
+    "bucket_size": 8,
+    "bucket_cap": 16,
+    "top_k": 2048,
+    "top_p": 512,
+    "window": 512,
+    "sink": 4,
+    "decode_queries": 64,
+}
 
 
 def bench(total, index_dim, block_size, pool_size, bucket_size, bucket_cap, top_k, top_p, window, sink, decode_queries):

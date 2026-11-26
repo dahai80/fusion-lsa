@@ -19,7 +19,7 @@ class EarlyBudget:
         for item in fields(self):
             value = getattr(self, item.name)
             if isinstance(value, bool) or not isinstance(value, int):
-                raise ValueError(f"early_budget {item.name} must be an integer - got {value!r}")
+                raise ValueError(f"early_budget {item.name} must be an integer - got {value!r}")  # noqa: TRY004
             if value < 1:
                 raise ValueError(f"early_budget {item.name} must be at least 1 - got {value}")
 
@@ -28,7 +28,7 @@ class EarlyBudget:
         if value is None or isinstance(value, EarlyBudget):
             return value
         if not isinstance(value, Mapping):
-            raise ValueError(
+            raise ValueError(  # noqa: TRY004
                 f"early_budget is a mapping of position, top_k and top_p, or null - got {value!r}"
             )
         names = [item.name for item in fields(cls)]

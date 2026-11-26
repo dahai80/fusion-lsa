@@ -32,6 +32,7 @@ def _resolve_commit():
             text=True,
             timeout=5,
             cwd=probe,
+            check=False,
         )
         return result.stdout.strip() or "unknown-commit"
     except (OSError, subprocess.SubprocessError):

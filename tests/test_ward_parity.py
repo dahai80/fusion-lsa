@@ -2,10 +2,9 @@ import logging
 
 import mlx.core as mx
 import pytest
+from helpers import to_mlx, to_numpy
 
 from fusion_lsa.core.ward import members_from_labels, pool_keys, ward_merge, ward_rounds
-
-from helpers import to_mlx, to_numpy
 
 logger = logging.getLogger(__name__)
 
