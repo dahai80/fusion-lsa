@@ -83,7 +83,7 @@ def test_partition_and_cap():
     sizes = mx.array(rng.integers(1, 4, size=(blocks, pools)).astype(np.float32))
     bucket_count = 8
     cap = int(sizes.sum(axis=1).max().item() / bucket_count) * 2 + 2
-    labels, reached = ward_rounds(keys, sizes, bucket_count, cap)
+    labels, _reached = ward_rounds(keys, sizes, bucket_count, cap)
     labels_np = np.array(labels)
     for b in range(blocks):
         counts = np.bincount(labels_np[b], minlength=bucket_count)

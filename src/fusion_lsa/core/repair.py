@@ -27,7 +27,7 @@ def select_repair_pages(page_scores, static_pages, repair_count: int):
     scores = np.asarray(page_scores).reshape(-1)
     if scores.size == 0:
         raise ValueError("page_scores is empty - no page index to repair from")
-    static_ids = set(int(p) for p in static.tolist())
+    static_ids = {int(p) for p in static.tolist()}
     if max(static_ids, default=0) >= scores.size or min(static_ids, default=0) < 0:
         raise ValueError("static_pages holds ids outside the page index")
     # Stable sort on negated scores: descending score, ascending id on ties.

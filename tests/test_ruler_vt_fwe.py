@@ -83,10 +83,10 @@ def test_qa_gold_fact_present_and_key_unique():
 
 def test_qa_distractor_cities_differ():
     prompt, city = build_qa_prompt(4000, seed=42)
-    key = re.search(r"grasveld-\d+", prompt.split("\n\n")[-1]).group(0)
+    assert re.search(r"grasveld-\d+", prompt.split("\n\n")[-1])
     # no distractor fact may use the gold city
     for m in re.finditer(r"The (kelvor-\d+) partnership agreement was signed in (\w+)", prompt):
-        assert not (m.group(2) == city), f"distractor {m.group(1)} reuses gold city"
+        assert m.group(2) != city, f"distractor {m.group(1)} reuses gold city"
     logger.info("qa distractors ok, city=%s", city)
 
 

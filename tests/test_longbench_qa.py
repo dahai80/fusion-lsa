@@ -52,7 +52,7 @@ def test_longbench_prompt_builder_deterministic_and_length_controlled():
         "answers": ["Alice"],
     }
     prompt_a, answers_a = build_longbench_qa_prompt(record, 2000, seed=41)
-    prompt_b, answers_b = build_longbench_qa_prompt(record, 2000, seed=41)
+    prompt_b, _answers_b = build_longbench_qa_prompt(record, 2000, seed=41)
     assert prompt_a == prompt_b, "same seed must give the same prompt"
     assert answers_a == ["Alice"]
     # Word budget follows the ~1.3 tokens-per-word convention of the other

@@ -1,11 +1,10 @@
 import logging
 
 import pytest
+from helpers import to_mlx, to_numpy
 
 from fusion_lsa.core.reference import build_buckets, read
 from fusion_lsa.core.ward import ward_rounds
-
-from helpers import to_mlx, to_numpy
 
 logger = logging.getLogger(__name__)
 

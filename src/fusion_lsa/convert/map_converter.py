@@ -79,10 +79,12 @@ class LsaMap:
             _check_field(metadata, "model_arch", model_arch, path)
             _check_field(metadata, "latent_dim", str(latent_dim), path)
             stored_layers = [int(x) for x in metadata.get("indexer_layers", "").split(",") if x]
+            # safetensors >= 0.8 dropped __contains__ on safe_open; compare against keys()
+            tensor_names = set(f.keys())
             for layer in stored_layers:
                 for role in ("query_projection", "key_projection"):
                     name = f"layer{layer}.{role}"
-                    if name not in f.keys():
+                    if name not in tensor_names:
                         raise ValueError(f"{path} lacks tensor {name} named in its metadata")
                     arr = f.get_tensor(name).astype(np.float32)
                     self.projections.setdefault(layer, {})[role] = mx.array(arr)

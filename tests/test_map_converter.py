@@ -2,10 +2,8 @@ import logging
 from pathlib import Path
 
 import mlx.core as mx
-import numpy as np
 import pytest
 import torch
-from safetensors.numpy import save_file
 
 from fusion_lsa.convert.map_converter import LsaMap, convert_map_pt, read_map_pt
 
