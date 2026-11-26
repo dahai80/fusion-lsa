@@ -82,7 +82,7 @@ class LsaMap:
             for layer in stored_layers:
                 for role in ("query_projection", "key_projection"):
                     name = f"layer{layer}.{role}"
-                    if name not in f.keys():
+                    if name not in f:
                         raise ValueError(f"{path} lacks tensor {name} named in its metadata")
                     arr = f.get_tensor(name).astype(np.float32)
                     self.projections.setdefault(layer, {})[role] = mx.array(arr)
