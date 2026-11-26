@@ -77,8 +77,8 @@ def test_selection_survives_4bit_keys():
     selected_q, _ = read(queries, positions, buckets_q, 512, 2048, 4, 512)
     overlaps = []
     for row in range(16):
-        want = set(int(x) for x in np.array(selected_fp)[row] if x >= 0)
-        got = set(int(x) for x in np.array(selected_q)[row] if x >= 0)
+        want = {int(x) for x in np.array(selected_fp)[row] if x >= 0}
+        got = {int(x) for x in np.array(selected_q)[row] if x >= 0}
         overlaps.append(len(want & got) / max(len(want), 1))
     mean_overlap = float(np.mean(overlaps))
     logger.info("4-bit key quantization selection overlap (synthetic gaussian): %.4f", mean_overlap)

@@ -1,10 +1,9 @@
 import logging
 
 import pytest
+from helpers import to_mlx, to_numpy
 
 from fusion_lsa.core.index_space import LearnedProjection, regroup, rownorm
-
-from helpers import to_mlx, to_numpy
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +27,6 @@ def test_regroup_parity(torch_index_space):
     assert (to_numpy(q_idx_m) - q_idx_t.numpy()).max() < 1e-3
     assert (to_numpy(k_idx_m) - k_idx_t.numpy()).max() < 1e-3
     # unit rows, zero rows stay zero
-    qz = q_idx_t[0, :, 0] * 0
     q0_t, k0_t = torch_index_space.regroup(q * 0, k)
     q0_m, k0_m = regroup(to_mlx(q * 0), to_mlx(k))
     assert abs(to_numpy(q0_m) - q0_t.numpy()).max() < 1e-6
