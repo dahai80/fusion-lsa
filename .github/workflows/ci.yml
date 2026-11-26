@@ -35,5 +35,9 @@ jobs:
           cache: pip
       - name: Install package
         run: pip install -e ".[test]"
+      - name: Lint
+        run: |
+          pip install ruff
+          ruff check .
       - name: Run tests
         run: python -m pytest tests/ -q --durations=10
