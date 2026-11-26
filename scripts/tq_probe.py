@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 
 def overlap(a: np.ndarray, b: np.ndarray) -> float:
-    want = set(int(x) for x in a if x >= 0)
-    got = set(int(x) for x in b if x >= 0)
+    want = {int(x) for x in a if x >= 0}
+    got = {int(x) for x in b if x >= 0}
     return len(want & got) / max(len(want), 1)
 
 
@@ -88,11 +88,20 @@ def main() -> None:
         for prefix in prefixes:
             layers[prefix] = (mx.array(data[f"{prefix}.index_keys"]), mx.array(data[f"{prefix}.index_queries"]))
 
-    lines = ["# TQ 4-bit probe on real checkpoint index vectors", "",
-             f"Source: `{args.vectors}`, layers {', '.join(p[5:] for p in prefixes)}, "
-             f"{layers[prefixes[0]][0].shape[0]} keys, index dim {layers[prefixes[0]][0].shape[1]}.", "",
-             "Metric: mean/min per-query selection set overlap against the fp32 baseline "
-             "(same buckets config, same queries). Keys dequantized then renormalized.", ""]
+    lines = [
+        "# TQ 4-bit probe on real checkpoint index vectors",
+        "",
+        (
+            f"Source: `{args.vectors}`, layers {', '.join(p[5:] for p in prefixes)}, "
+            f"{layers[prefixes[0]][0].shape[0]} keys, index dim {layers[prefixes[0]][0].shape[1]}."
+        ),
+        "",
+        (
+            "Metric: mean/min per-query selection set overlap against the fp32 baseline "
+            "(same buckets config, same queries). Keys dequantized then renormalized."
+        ),
+        "",
+    ]
     for prefix, (keys, queries) in layers.items():
         lines.append(f"## {prefix} (decoder layer {prefix[5:]})", )
         lines.append("")

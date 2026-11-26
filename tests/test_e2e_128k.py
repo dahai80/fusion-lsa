@@ -49,7 +49,7 @@ def index_cache():
 
 
 def test_128k_pipeline_shape_and_cost(index_cache):
-    keys, topics, needle, needle_positions, buckets = index_cache
+    _keys, _topics, _needle, _needle_positions, buckets = index_cache
     assert buckets.bucket_centroids.shape[0] == TOTAL // BUCKET
     gen = mx.random.key(7)
     queries = _unit_rows(mx.random.normal((8, DIM), key=gen).astype(mx.float32))
@@ -64,7 +64,7 @@ def test_128k_pipeline_shape_and_cost(index_cache):
 
 
 def test_128k_needle_retrieved_by_selection(index_cache):
-    keys, topics, needle, needle_positions, buckets = index_cache
+    _keys, _topics, needle, needle_positions, buckets = index_cache
     queries = needle[None, :]
     positions = mx.array([TOTAL - 1])
     selected, lengths = read(queries, positions, buckets, TOP_P, TOP_K, SINK, WINDOW)
@@ -85,7 +85,7 @@ def _captured_mass(keys, query, selected_row):
 
 
 def test_128k_selected_keys_hold_attention_mass(index_cache):
-    keys, topics, needle, needle_positions, buckets = index_cache
+    keys, topics, needle, _needle_positions, buckets = index_cache
     queries = mx.concatenate([needle[None, :], topics[:4]], axis=0)
     positions = mx.array([TOTAL - 1] * 5)
     selected, lengths = read(queries, positions, buckets, TOP_P, TOP_K, SINK, WINDOW)

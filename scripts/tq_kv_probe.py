@@ -168,10 +168,12 @@ def main() -> None:
     lines = [
         "# TQ attention-KV probe on real checkpoint KV",
         "",
-        f"Source: `{args.vectors}`, layers {', '.join(p[5:] for p in prefixes)}. "
-        f"K quantized per-channel with {ESCAPE_CHANNEL_COUNT} fp16 escape channels, V per-token, "
-        f"top-{TOPK} key agreement and attention-output relative drift against fp32, "
-        "causal-masked, GQA groups averaged.",
+        (
+            f"Source: `{args.vectors}`, layers {', '.join(p[5:] for p in prefixes)}. "
+            f"K quantized per-channel with {ESCAPE_CHANNEL_COUNT} fp16 escape channels, V per-token, "
+            f"top-{TOPK} key agreement and attention-output relative drift against fp32, "
+            "causal-masked, GQA groups averaged."
+        ),
         "",
     ]
     for prefix, (q, k, v) in layers.items():

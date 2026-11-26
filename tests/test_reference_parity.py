@@ -1,11 +1,16 @@
 import logging
 
 import pytest
+from helpers import to_mlx, to_numpy
 
 from fusion_lsa.budget import EarlyBudget
-from fusion_lsa.core.reference import build_buckets, check_sizes, check_unit_rows, expand_buckets, read
-
-from helpers import to_mlx, to_numpy
+from fusion_lsa.core.reference import (
+    build_buckets,
+    check_sizes,
+    check_unit_rows,
+    expand_buckets,
+    read,
+)
 
 logger = logging.getLogger(__name__)
 

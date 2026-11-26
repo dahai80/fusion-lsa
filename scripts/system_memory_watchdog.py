@@ -18,7 +18,7 @@ logger = logging.getLogger("system-memory-watchdog")
 
 def read_pressure_level() -> int:
     out = subprocess.run(
-        PRESSURE_CMD, capture_output=True, text=True, timeout=10
+        PRESSURE_CMD, capture_output=True, text=True, timeout=10, check=False
     )
     return int(out.stdout.strip())
 
@@ -39,7 +39,7 @@ def main() -> None:
     while True:
         try:
             level = read_pressure_level()
-        except Exception as exc:
+        except (subprocess.SubprocessError, ValueError, OSError) as exc:
             logger.warning("pressure read failed: %s", exc)
             level = 0
         if level >= 3:

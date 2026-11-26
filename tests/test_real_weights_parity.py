@@ -46,16 +46,15 @@ def test_real_weights_selection_parity(vectors):
         torch_selected = data[f"{prefix}.selected"]
         torch_lengths = data[f"{prefix}.lengths"]
         buckets = build_buckets(keys, pool_size, bucket_size, bucket_cap, window_size)
-        selected, lengths = read(queries, positions, buckets, top_p, top_k, sink_size, window_size)
+        selected, _lengths = read(queries, positions, buckets, top_p, top_k, sink_size, window_size)
         got = np.array(selected)
         want = torch_selected
         for row in range(got.shape[0]):
             total_rows += 1
-            got_set = set(int(x) for x in got[row] if x >= 0)
-            want_set = set(int(x) for x in want[row][: torch_lengths[row]] if x >= 0)
+            got_set = {int(x) for x in got[row] if x >= 0}
+            want_set = {int(x) for x in want[row][: torch_lengths[row]] if x >= 0}
             if got_set != want_set:
                 mismatched_rows += 1
-                overlap = len(got_set & want_set) / max(len(want_set), 1)
                 logger.warning(
                     "%s row %d: %d/%d keys shared, %d vs %d selected",
                     prefix,
@@ -86,7 +85,7 @@ def test_real_weights_budget_respected(vectors):
         _meta(data, "bucket_cap"),
         window_size,
     )
-    selected, lengths = read(
+    _selected, lengths = read(
         queries,
         positions,
         buckets,

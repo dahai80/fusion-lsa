@@ -24,9 +24,10 @@ def _memory_snapshot() -> str:
                 capture_output=True,
                 text=True,
                 timeout=2,
+                check=False,
             ).stdout.strip()
         ) * 1024
-    except Exception:
+    except (OSError, subprocess.SubprocessError, ValueError):
         rss = 0
     return (
         f"active={mx.get_active_memory() / 2**30:.2f}GB "
