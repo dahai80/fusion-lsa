@@ -33,7 +33,9 @@ def extract_patched_kda(src_path=None):
     found = []
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in REQUIRED_FUNCS:
-            exec(ast.get_source_segment(src, node), ns)
+            # Intentional exec: run the exact deployed source extracted by AST
+            # (see docstring); a re-implementation could drift from serving.
+            exec(ast.get_source_segment(src, node), ns)  # noqa: S102
             found.append(node.name)
     missing = [name for name in REQUIRED_FUNCS if name not in ns]
     if missing:
