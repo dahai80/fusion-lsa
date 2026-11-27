@@ -8,6 +8,7 @@ from fusion_lsa.kda_validation import (
     dev_stats,
     extract_patched_kda,
     make_inputs,
+    patched_src_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 @pytest.fixture(scope="module")
 def ns():
+    # The bypasses are extracted from the deployed serving source, which
+    # only exists on machines with the vllm-ascend artifacts checkout.
+    if not patched_src_path().is_file():
+        pytest.skip("deployed kimi_k3_patched.py artifact not available")
     return extract_patched_kda()
 
 
