@@ -28,11 +28,11 @@ Key scripts (all under `scripts/`):
 
 - `src/fusion_lsa/` — `core/` (selection logic, parity), `index/`, `quant/`, `evaluation/`, `convert/`, `budget.py`
 - `tests/` — pytest; some tests skip without MLX/Metal or model artifacts
-- `docs/` — probe reports and design docs (P3 coexistence, HSA M0 spike plan)
+- `docs/` — probe reports and design docs (P3 coexistence, sparse-prefill M0 spike plan)
 
 ## Conventions
 
-- `models/` holds local model weights (git-ignored, ~23G). The Qwen3.8-27B snapshot is the locked model for the HSA M0 spike and probe vector sources — do not delete; scripts reference it by default.
+- `models/` holds local model weights (git-ignored, ~23G). The Qwen3.8-27B snapshot is the locked model for the sparse-prefill M0 spike and probe vector sources — do not delete; scripts reference it by default.
 - Parity rule: selection logic must match the upstream torch oracle bit-for-bit on identical inputs; new selection features need a parity test.
 - Probe outputs are committed as markdown docs (`docs/tq-*.md`), not binary dumps.
 - English-only for code comments, logs, and all GitHub artifacts; user-facing docs may be bilingual.

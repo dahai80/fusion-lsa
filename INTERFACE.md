@@ -10,9 +10,8 @@ implementations are derived ports and must not diverge.
 1. `Prefrontal-AI` reference implementation (upstream research code).
 2. fusion-lsa parity tests (`tests/test_incremental_index.py` — incremental
    vs. batched reference, per-device pinning).
-3. hsa cross-backend parity (`hsa/tests/test_index_ward.py` — the derived
-   torch port in `hsa/src/hsa/index/` is cross-checked against these
-   semantics).
+3. cross-backend parity in the derived torch port (its index Ward tests
+   cross-check the same selection semantics).
 
 ## Change protocol
 
@@ -20,7 +19,7 @@ implementations are derived ports and must not diverge.
   selection, tie-break rules, float accumulation order, bucket boundaries.
   Requires, before merge:
   1. rerun of the 5 fusion-lsa parity tests (`tests/test_incremental_index.py`);
-  2. rerun of the hsa cross-backend parity suite (`hsa/tests/test_index_ward.py`);
+  2. rerun of the cross-backend parity suite in the derived torch port;
   3. commit message prefix `semantics:`.
 - **Resource-only change** — storage placement, execution stream, caching,
   memory strategy. Exempt from parity reruns, but must carry its own
