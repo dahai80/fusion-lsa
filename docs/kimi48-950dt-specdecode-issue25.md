@@ -86,10 +86,19 @@ chunked bypass keeps concurrent sequences' states apart.
 
 Related new defect filed separately as issue #28: concurrent traffic (RULER
 `--threads 4` is enough) can form a mixed prefill+decode batch, which the
-Ascend Kimi GDN path rejects with `NotImplementedError` at
-`vllm_ascend/models/kimi_k3.py:988`, killing the whole engine. Long-context
-numbers in this doc must be produced single-request (or with a scheduler fix)
-until that is addressed.
+Ascend Kimi GDN path rejected with `NotImplementedError` at
+`vllm_ascend/models/kimi_k3.py:988`, killing the whole engine.
+**Fix (2026-11-27)**: the mixed batch now routes through the prefill path —
+the metadata builder already emits full-batch conv metadata (decode rows
+first, one token each, `has_initial_state = context_len > 0`), so decode rows
+run as T=1 sequences through `causal_conv1d_fn` + the chunk KDA bypass,
+reading/writing their committed conv and recurrent state slots. Verified
+offline: a `[1, 1, 1024]` mixed-length batch matches the per-sequence
+sequential oracle at fp32 rounding level (out 6.9e-08, state 7.0e-07,
+`tests/test_kda_multi_seq.py::test_chunk_bypass_mixed_decode_like_len1_seqs`);
+patch deployed to the node serve stack, runtime verification pending card
+availability. Concurrent long-context runs no longer need the
+single-request restriction once runtime-verified.
 
 **Original (incorrect) attribution, kept for the record:** the 4K/8K cliff was
 read as corrupted cross-chunk KDA state, with a hallucinated 32K needle as
