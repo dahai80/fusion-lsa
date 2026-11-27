@@ -46,22 +46,56 @@ no truncation, KV cache 3.7M tokens).
 Spec OFF reproduces the spec-ON curve exactly, so speculative decoding is ruled
 out as a variable: the failure belongs to the chunked-bypass serving path itself.
 
-**Verdict: FAIL — pass criterion (correct retrieval at both target lengths) is
-not met.** The failure is a cliff between one and two prefill chunks: 4K (one
-`KIMI_KDA_TORCH_PREFILL_CHUNK` chunk) is exactly lossless, 8K and beyond are
-broken. At 32K the model emits a *hallucinated* needle number (pred `2694522`,
-gold `4226067`, pred not present anywhere in the input), i.e. the KDA recurrent
-state handed across chunk boundaries is corrupted end-to-end — not a
-retrieval-offset error. vt and fwe fail in the same pattern (template-echo /
-wrong-content outputs at 32K and 131K).
+**Verdict (superseded 2026-11-27 late, see "Root-cause correction" below):
+FAIL as run, but the failure is NOT the chunked-bypass serving path.** The
+original attribution below — "KDA recurrent state handed across chunk
+boundaries is corrupted" — was falsified by the follow-up bisect on the same
+day: the harness failures are caused by vLLM prefix caching reusing mamba/KDA
+state across *different* prompts that share the RULER essay-corpus prefix, not
+by any cross-chunk state bug in the patched path.
 
-This falsifies the unit-level evidence for the chunked bypass: `_torch_chunk_kda`
-is bit-exact against the `naive_chunk_kda` oracle per-chunk (6/6 fp32 cases), but
-per-chunk parity does not validate the cross-chunk state handoff in the serving
-path (model runner ↔ patched model ↔ conv-state roll). Number-one suspect is the
-cross-chunk recurrent-state carry (`KIMI_KDA_CONV_ROLL` path); a 2-chunk minimal
-repro (e.g. 6K prompt) plus per-chunk state diff against the sequential oracle is
-the next diagnostic step.
+**Root-cause correction (2026-11-27, issue #26).** Evidence chain:
+
+1. Single-request replay of the exact harness prompts (same jsonl records,
+   same sampling params, same openai client, same tunnel) returned the correct
+   needle every time, including for records the harness had just scored 0.
+2. The official harness runs `call_api.py --threads 4`: concurrent requests.
+   Three different 32K records (golds `8361662` / `6361026` / `4120696`, needle
+   at different depths) all produced the *identical* prediction — record 1's
+   needle `6361026`; vt and fwe showed the same collapse to one shared output.
+3. The server log showed `enable_prefix_caching=True` plus
+   `Mamba cache mode is set to 'align' for KimiLinearForCausalLM by default
+   when prefix caching is enabled` — all three records share the same
+   deterministic essay corpus (same seed, needle at a different depth), so the
+   cached mamba/KDA state of whichever request filled the prefix first is
+   reused for the others.
+4. With `--no-enable-prefix-caching` the harness numbers recover fully
+   (single-sample per length to avoid the concurrent-batch crash, see below):
+   8K **0.0 → 100.0**, 32K **33.3 → 100.0** (fresh seeds 43/44; the 32K
+   prediction verified against gold `8610642`, exact needle hit, no
+   truncation). Long-context losslessness of the chunked-bypass serving path
+   stands once prefix caching is disabled; the Gap 1 verdict therefore flips
+   from FAIL to PASS-under-`--no-enable-prefix-caching` (footnote any paper
+   numbers with that flag).
+
+Parity probes added in this branch pin the bypass itself: chained 2048-token
+scheduler slices match the full-length sequential pass at fp32 rounding level
+(`serving_slice_chain`), and an n_seq=2 multi-sequence batch matches the
+per-sequence sequential oracle at 7e-7 (`tests/test_kda_multi_seq.py`) — the
+chunked bypass keeps concurrent sequences' states apart.
+
+Related new defect filed separately as issue #28: concurrent traffic (RULER
+`--threads 4` is enough) can form a mixed prefill+decode batch, which the
+Ascend Kimi GDN path rejects with `NotImplementedError` at
+`vllm_ascend/models/kimi_k3.py:988`, killing the whole engine. Long-context
+numbers in this doc must be produced single-request (or with a scheduler fix)
+until that is addressed.
+
+**Original (incorrect) attribution, kept for the record:** the 4K/8K cliff was
+read as corrupted cross-chunk KDA state, with a hallucinated 32K needle as
+supporting evidence. The hallucinated needle was in fact record 1's answer
+leaking through the prefix-cache reuse described above; per-chunk and
+cross-chunk bypass numerics were never the problem.
 
 ## Gap 2 — Performance debt quantified
 
