@@ -8,7 +8,7 @@ import torch
 logger = logging.getLogger(__name__)
 
 DEFAULT_PATCHED_SRC = (
-    "/Users/dahai/fusion/vllm-ascend-pr/container-v032/"
+    "~/fusion/vllm-ascend-pr/container-v032/"
     "artifacts-20261126/final/kimi_k3_patched.py"
 )
 PATCHED_SRC_ENV = "KIMI_K3_PATCHED_SRC"
@@ -16,7 +16,7 @@ REQUIRED_FUNCS = ("_torch_seq_kda", "_torch_chunk_kda", "_kda_post_gate")
 
 
 def patched_src_path():
-    return Path(os.environ.get(PATCHED_SRC_ENV, DEFAULT_PATCHED_SRC))
+    return Path(os.path.expanduser(os.environ.get(PATCHED_SRC_ENV, DEFAULT_PATCHED_SRC)))
 
 
 def extract_patched_kda(src_path=None):

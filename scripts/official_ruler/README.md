@@ -52,7 +52,7 @@ ignores the `model` field and serves its loaded model.
 ## Reproduction
 
 ```bash
-cd /Users/dahai/fusion
+cd ~/fusion
 source .venv/bin/activate
 cd fusion-lsa
 

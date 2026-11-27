@@ -13,9 +13,9 @@ MAP="${HOME}/fusion/fusion-lsa/models/maps/qwen38_27b__long-16k-1M-heavy-key-and
 OUT_DIR="${HOME}/.fusion-mlx/logs"
 STAMP=$(date +%Y%m%d-%H%M%S)
 SERVE_LOG="${OUT_DIR}/ruler-vtfwe-serve-${STAMP}.log"
-FUSION_MLX_BIN="/Users/dahai/fusion/.venv/bin/fusion-mlx"
-PY=/Users/dahai/fusion/.venv/bin/python3   # repo venv: has httpx
-API_KEY=$(python3 -c "import json; d=json.load(open('/Users/dahai/.fusion-mlx/settings.json')); print(d.get('server',{}).get('api_key') or d.get('api_key') or '')")
+FUSION_MLX_BIN="${HOME}/fusion/.venv/bin/fusion-mlx"
+PY=${HOME}/fusion/.venv/bin/python3   # repo venv: has httpx
+API_KEY=$(python3 -c "import json, os; d=json.load(open(os.path.expanduser('~/.fusion-mlx/settings.json'))); print(d.get('server',{}).get('api_key') or d.get('api_key') or '')")
 
 cleanup() {
     if [[ -n "${SERVE_PID:-}" ]] && kill -0 "${SERVE_PID}" 2>/dev/null; then

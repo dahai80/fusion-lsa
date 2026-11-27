@@ -35,7 +35,7 @@ docs/           P0 报告、bench 结果与日志
 ## 环境准备
 
 ```bash
-cd /Users/dahai/fusion
+cd ~/fusion
 source .venv/bin/activate
 cd fusion-lsa && pip install -e ".[test]"
 python -m pytest tests/

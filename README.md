@@ -39,7 +39,7 @@ docs/           P0 report, bench results and logs
 ## Setup
 
 ```bash
-cd /Users/dahai/fusion
+cd ~/fusion
 source .venv/bin/activate
 cd fusion-lsa && pip install -e ".[test]"
 python -m pytest tests/
