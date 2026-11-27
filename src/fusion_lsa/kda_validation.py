@@ -306,3 +306,35 @@ def compare_candidate_output(ref_out, cand_out, tag="candidate"):
             stats["per_token_abs"][worst].item(),
         )
     return stats
+
+
+def serving_slice_chain(ns, t, slice_len, seed=7, h=8, kk=128, vv=128):
+    # Simulate the serving flow end-to-end at the KDA layer: the model runner
+    # chunks a long prefill into scheduler slices (observed T=2048 in
+    # KTORCHCHUNK logs), each slice runs _torch_chunk_kda with the previous
+    # slice's final recurrent state (cache layout [n_seq,H,V,K]) and writes
+    # the returned final state back. Reference: one _torch_seq_kda call over
+    # the whole T. Any structural divergence here reproduces the RULER cliff
+    # between 1 and 2 scheduler chunks without needing NPU hardware.
+    inp = make_inputs(t, seed=seed, h=h, kk=kk, vv=vv)
+    args = (inp["q"], inp["k"], inp["v"], inp["g"], inp["beta"])
+    o_ref, s_ref = ns["_torch_seq_kda"](*args, inp["init"], [0, t], inp["a_log"], inp["dt_bias"], inp["lower_bound"])
+    state = inp["init"].clone()
+    outs = []
+    for st in range(0, t, slice_len):
+        en = min(st + slice_len, t)
+        o_i, s_i = ns["_torch_chunk_kda"](
+            args[0][:, st:en], args[1][:, st:en], args[2][:, st:en], args[3][:, st:en], args[4][:, st:en],
+            state, [0, en - st], inp["a_log"], inp["dt_bias"], inp["lower_bound"],
+        )
+        outs.append(o_i)
+        state = s_i
+    o_sliced = torch.cat(outs, dim=1)
+    return {
+        "t": t,
+        "slices": (t + slice_len - 1) // slice_len,
+        "out": dev_stats(o_ref, o_sliced),
+        # Both raw bypass states use the cache layout [n_seq, H, V, K]; the
+        # chunked bypass transposes internally, so no transpose here.
+        "state": dev_stats(s_ref, state),
+    }
