@@ -3,7 +3,7 @@
 Status of the three acceptance gaps from
 [dahai80/fusion-lsa#25](https://github.com/dahai80/fusion-lsa/issues/25) that gate the
 "Kimi-Linear-48B-A3B-Instruct served losslessly on 950DT" premise before it is used
-downstream (HSA paper Tianshu track, R5 128K column).
+downstream (long-context serving baseline for a paper submission).
 
 Campaign context: the 2026-11-26 spec-decode repair campaign (summary deck
 `Kimi48-950DT-spec-decode-修复战役总结-20261126.pptx`, artifacts in the
